@@ -63,6 +63,7 @@ pub fn convert(input: &Path, output: &Path, target: Format) -> Result<(), Conver
     match (source, target) {
         (Format::Markdown, Format::Html) => md_to_html(input, output),
         (Format::Markdown, Format::Pdf) => md_to_pdf(input, output),
+        (Format::Markdown, Format::Typst) => md_to_typst(input, output),
         (Format::Html, Format::Markdown) => html_to_md(input, output),
         (Format::Html, Format::Pdf) => html_to_pdf(input, output),
         (Format::Pdf, Format::Markdown) => pdf_to_md(input, output),
@@ -80,8 +81,11 @@ pub fn convert(input: &Path, output: &Path, target: Format) -> Result<(), Conver
 // ---------------------------------------------------------------------------
 
 fn md_to_html(input: &Path, output: &Path) -> Result<(), ConversionError> {
+    use pulldown_cmark::Options;
     let md = std::fs::read_to_string(input)?;
-    let parser = pulldown_cmark::Parser::new(&md);
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let parser = pulldown_cmark::Parser::new_ext(&md, options);
     let mut html = String::new();
     pulldown_cmark::html::push_html(&mut html, parser);
     std::fs::write(output, html)?;
@@ -97,6 +101,243 @@ fn md_to_pdf(input: &Path, output: &Path) -> Result<(), ConversionError> {
         None,
     )
     .map_err(|e| ConversionError::ConversionFailed(e.to_string()))
+}
+
+/// Write to either a cell buffer (when inside a table cell) or the main output.
+fn emit_to(buf: &mut Option<String>, output: &mut String, s: &str) {
+    if let Some(cell) = buf.as_mut() {
+        cell.push_str(s);
+    } else {
+        output.push_str(s);
+    }
+}
+
+fn md_to_typst(input: &Path, output: &Path) -> Result<(), ConversionError> {
+    use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Tag, TagEnd};
+
+    let md = std::fs::read_to_string(input)?;
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let parser = pulldown_cmark::Parser::new_ext(&md, options);
+    let mut typst = String::new();
+
+    // State for links: we buffer the inner text between Start(Link) and End(Link)
+    let mut in_link = false;
+    let mut link_text = String::new();
+    let mut link_url = String::new();
+
+    // State for lists
+    let mut in_ordered_list = false;
+
+    // State for tables
+    let mut cell_buffer: Option<String> = None;
+    let mut in_table_head = false;
+    let mut table_alignments: Vec<String> = Vec::new();
+    let mut table_rows: Vec<(bool, Vec<String>)> = Vec::new(); // (is_header, cells)
+    let mut current_row: Vec<String> = Vec::new();
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Heading { level, .. } => {
+                    let n = match level {
+                        HeadingLevel::H1 => 1,
+                        HeadingLevel::H2 => 2,
+                        HeadingLevel::H3 => 3,
+                        HeadingLevel::H4 => 4,
+                        HeadingLevel::H5 => 5,
+                        HeadingLevel::H6 => 6,
+                    };
+                    for _ in 0..n {
+                        emit_to(&mut cell_buffer, &mut typst, "=");
+                    }
+                    emit_to(&mut cell_buffer, &mut typst, " ");
+                }
+                Tag::Paragraph => {}
+                Tag::BlockQuote(_) => {
+                    emit_to(&mut cell_buffer, &mut typst, "> ");
+                }
+                Tag::CodeBlock(kind) => {
+                    let lang = match kind {
+                        CodeBlockKind::Fenced(lang) => lang.to_string(),
+                        CodeBlockKind::Indented => String::new(),
+                    };
+                    emit_to(&mut cell_buffer, &mut typst, "```");
+                    emit_to(&mut cell_buffer, &mut typst, &lang);
+                    emit_to(&mut cell_buffer, &mut typst, "\n");
+                }
+                Tag::List(start) => {
+                    in_ordered_list = start.is_some();
+                }
+                Tag::Item => {
+                    if in_ordered_list {
+                        emit_to(&mut cell_buffer, &mut typst, "+ ");
+                    } else {
+                        emit_to(&mut cell_buffer, &mut typst, "- ");
+                    }
+                }
+                Tag::Emphasis => {
+                    emit_to(&mut cell_buffer, &mut typst, "_");
+                }
+                Tag::Strong => {
+                    emit_to(&mut cell_buffer, &mut typst, "*");
+                }
+                Tag::Strikethrough => {
+                    emit_to(&mut cell_buffer, &mut typst, "~~");
+                }
+                Tag::Link { dest_url, .. } => {
+                    in_link = true;
+                    link_text.clear();
+                    link_url = dest_url.to_string();
+                }
+                Tag::Image { dest_url, .. } => {
+                    emit_to(&mut cell_buffer, &mut typst, "#figure(image(\"");
+                    emit_to(&mut cell_buffer, &mut typst, &dest_url);
+                    emit_to(&mut cell_buffer, &mut typst, "\"), caption: [");
+                }
+                Tag::Table(alignments) => {
+                    table_alignments = alignments
+                        .iter()
+                        .map(|a| match a {
+                            Alignment::None => "auto".to_string(),
+                            Alignment::Left => "left".to_string(),
+                            Alignment::Center => "center".to_string(),
+                            Alignment::Right => "right".to_string(),
+                        })
+                        .collect();
+                    table_rows.clear();
+                    current_row.clear();
+                }
+                Tag::TableHead => {
+                    in_table_head = true;
+                    current_row.clear();
+                }
+                Tag::TableRow => {
+                    current_row.clear();
+                }
+                Tag::TableCell => {
+                    cell_buffer = Some(String::new());
+                }
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Heading(_) => {
+                    emit_to(&mut cell_buffer, &mut typst, "\n");
+                }
+                TagEnd::Paragraph => {
+                    emit_to(&mut cell_buffer, &mut typst, "\n\n");
+                }
+                TagEnd::BlockQuote(_) => {
+                    emit_to(&mut cell_buffer, &mut typst, "\n");
+                }
+                TagEnd::CodeBlock => {
+                    emit_to(&mut cell_buffer, &mut typst, "```\n");
+                }
+                TagEnd::Item => {
+                    emit_to(&mut cell_buffer, &mut typst, "\n");
+                }
+                TagEnd::List(ordered) => {
+                    in_ordered_list = ordered;
+                    emit_to(&mut cell_buffer, &mut typst, "\n");
+                }
+                TagEnd::Emphasis => {
+                    emit_to(&mut cell_buffer, &mut typst, "_");
+                }
+                TagEnd::Strong => {
+                    emit_to(&mut cell_buffer, &mut typst, "*");
+                }
+                TagEnd::Strikethrough => {
+                    emit_to(&mut cell_buffer, &mut typst, "~~");
+                }
+                TagEnd::Link => {
+                    let link = format!("#link(\"{}\")[{}]", link_url, link_text);
+                    emit_to(&mut cell_buffer, &mut typst, &link);
+                    in_link = false;
+                }
+                TagEnd::Image => {
+                    emit_to(&mut cell_buffer, &mut typst, "])\n");
+                }
+                TagEnd::TableCell => {
+                    if let Some(content) = cell_buffer.take() {
+                        current_row.push(content);
+                    }
+                }
+                TagEnd::TableRow => {
+                    if !in_table_head {
+                        let row = std::mem::take(&mut current_row);
+                        table_rows.push((false, row));
+                    }
+                }
+                TagEnd::TableHead => {
+                    let row = std::mem::take(&mut current_row);
+                    table_rows.push((true, row));
+                    in_table_head = false;
+                }
+                TagEnd::Table => {
+                    // Emit the complete Typst table
+                    let col_str = table_alignments.join(", ");
+                    typst.push_str(&format!("#table(\n  columns: ({col_str}),\n"));
+                    for (is_header, cells) in &table_rows {
+                        let cell_strs: Vec<String> =
+                            cells.iter().map(|c| format!("[{}]", c)).collect();
+                        if *is_header {
+                            typst.push_str(&format!("  table.header({}),\n", cell_strs.join(", ")));
+                        } else {
+                            typst.push_str(&format!("  {},\n", cell_strs.join(", ")));
+                        }
+                    }
+                    typst.push_str(")\n\n");
+                    table_rows.clear();
+                    current_row.clear();
+                }
+                _ => {}
+            },
+            Event::Text(text) => {
+                if in_link {
+                    link_text.push_str(&text);
+                } else {
+                    emit_to(&mut cell_buffer, &mut typst, &text);
+                }
+            }
+            Event::Code(code) => {
+                let s = format!("`{}`", code);
+                emit_to(&mut cell_buffer, &mut typst, &s);
+            }
+            Event::SoftBreak => {
+                emit_to(&mut cell_buffer, &mut typst, "\n");
+            }
+            Event::HardBreak => {
+                emit_to(&mut cell_buffer, &mut typst, "\\\n");
+            }
+            Event::Rule => {
+                emit_to(&mut cell_buffer, &mut typst, "#line(length: 100%)\n\n");
+            }
+            Event::Html(_) => {} // Skip raw HTML — not meaningful in Typst
+            Event::FootnoteReference(name) => {
+                let s = format!("[^{}]", name);
+                emit_to(&mut cell_buffer, &mut typst, &s);
+            }
+            Event::TaskListMarker(checked) => {
+                if checked {
+                    emit_to(&mut cell_buffer, &mut typst, "[x] ");
+                } else {
+                    emit_to(&mut cell_buffer, &mut typst, "[ ] ");
+                }
+            }
+            Event::InlineMath(math) => {
+                let s = format!("${}$", math);
+                emit_to(&mut cell_buffer, &mut typst, &s);
+            }
+            Event::DisplayMath(math) => {
+                let s = format!("$ {} $\n", math);
+                emit_to(&mut cell_buffer, &mut typst, &s);
+            }
+            Event::InlineHtml(_html) => {} // Skip inline HTML
+        }
+    }
+
+    std::fs::write(output, typst)?;
+    Ok(())
 }
 
 fn html_to_md(input: &Path, output: &Path) -> Result<(), ConversionError> {
@@ -543,14 +784,151 @@ mod tests {
     }
 
     #[test]
-    fn convert_unsupported_conversion_pair_md_to_typst() {
-        let input = Path::new("input.md");
-        let output = Path::new("output.typ");
-        let result = convert(input, output, Format::Typst);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConversionError::UnsupportedFormat(_)));
-        assert!(err.to_string().contains("Markdown → Typst"));
+    fn convert_md_to_typst_basic() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let input_path = dir.path().join("test.md");
+        let output_path = dir.path().join("output.typ");
+
+        std::fs::write(
+            &input_path,
+            "# Hello\n\nThis is **bold** and _italic_ text.\n",
+        )
+        .expect("write input");
+
+        let result = convert(&input_path, &output_path, Format::Typst);
+        assert!(result.is_ok(), "MD → Typst failed: {:?}", result);
+
+        assert!(output_path.exists(), "output file should exist");
+
+        let typst = std::fs::read_to_string(&output_path).expect("read output");
+        // Heading: # → =
+        assert!(
+            typst.contains("= Hello"),
+            "should contain Typst heading, got: {typst:?}"
+        );
+        // Bold: ** → ** (same in Typst)
+        assert!(
+            typst.contains("*bold*"),
+            "should contain bold, got: {typst:?}"
+        );
+        // Italic: _ → _ (same in Typst)
+        assert!(
+            typst.contains("_italic_"),
+            "should contain italic, got: {typst:?}"
+        );
+    }
+
+    #[test]
+    fn convert_md_to_typst_with_list() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let input_path = dir.path().join("test.md");
+        let output_path = dir.path().join("output.typ");
+
+        std::fs::write(&input_path, "- Item 1\n- Item 2\n- Item 3\n").expect("write input");
+
+        let result = convert(&input_path, &output_path, Format::Typst);
+        assert!(result.is_ok(), "MD → Typst failed: {:?}", result);
+
+        let typst = std::fs::read_to_string(&output_path).expect("read output");
+        assert!(
+            typst.contains("- Item 1"),
+            "should contain list items, got: {typst:?}"
+        );
+        assert!(typst.contains("- Item 2"), "should contain second item");
+    }
+
+    #[test]
+    fn convert_md_to_typst_empty_input() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let input_path = dir.path().join("empty.md");
+        let output_path = dir.path().join("output.typ");
+
+        std::fs::write(&input_path, "").expect("write input");
+        let result = convert(&input_path, &output_path, Format::Typst);
+        assert!(
+            result.is_ok(),
+            "empty md to typst should convert: {:?}",
+            result
+        );
+
+        let typst = std::fs::read_to_string(&output_path).expect("read output");
+        assert!(typst.is_empty() || typst.trim().is_empty());
+    }
+
+    #[test]
+    fn convert_md_to_typst_with_table() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let input_path = dir.path().join("test.md");
+        let output_path = dir.path().join("output.typ");
+
+        std::fs::write(
+            &input_path,
+            "| Header 1 | Header 2 |\n| --- | --- |\n| Cell 1 | Cell 2 |\n",
+        )
+        .expect("write input");
+
+        let result = convert(&input_path, &output_path, Format::Typst);
+        assert!(
+            result.is_ok(),
+            "MD \u{2192} Typst table failed: {:?}",
+            result
+        );
+
+        let typst = std::fs::read_to_string(&output_path).expect("read output");
+        assert!(
+            typst.contains("#table("),
+            "should contain Typst table, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("table.header"),
+            "should contain table.header, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("Header 1"),
+            "should contain header text, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("Cell 1"),
+            "should contain cell text, got: {typst:?}"
+        );
+    }
+
+    #[test]
+    fn convert_md_to_typst_with_table_and_inline_formatting() {
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let input_path = dir.path().join("test.md");
+        let output_path = dir.path().join("output.typ");
+
+        std::fs::write(
+            &input_path,
+            "| **Bold** | _Italic_ |\n| --- | --- |\n| `code` | [link](url) |\n",
+        )
+        .expect("write input");
+
+        let result = convert(&input_path, &output_path, Format::Typst);
+        assert!(
+            result.is_ok(),
+            "MD \u{2192} Typst table with formatting failed: {:?}",
+            result
+        );
+
+        let typst = std::fs::read_to_string(&output_path).expect("read output");
+        assert!(
+            typst.contains("*Bold*"),
+            "should preserve bold in table, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("_Italic_"),
+            "should preserve italic in table, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("`code`"),
+            "should preserve code in table, got: {typst:?}"
+        );
+        assert!(
+            typst.contains("#link(\"url\")[link]"),
+            "should preserve link in table, got: {typst:?}"
+        );
     }
 
     #[test]

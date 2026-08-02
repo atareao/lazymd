@@ -32,6 +32,7 @@ src/
 |-----------|-----------|-------|
 | MD → HTML | `pulldown-cmark` | CommonMark parser. `Parser::new()` + `html::push_html()`. |
 | MD → PDF  | `markdown2pdf` | Lexer + layout engine + printpdf backend. Single crate, no intermediate HTML. `parse_into_file()` or `parse_into_bytes()`. |
+| MD → Typst | `pulldown-cmark` (conversor propio) | Parsea Markdown con `pulldown-cmark` y emite sintaxis Typst. `=` para headings, `#link()` para enlaces, `#figure(image())` para imágenes. Siempre disponible (no necesita feature flag). |
 | HTML → MD | `html2md` | Pure Rust, simple API. |
 | HTML → PDF| `printpdf` (html feature) | `PdfDocument::from_html()` with inline CSS. |
 | PDF → MD  | `pdf_oxide` | Via `pdf_oxide::api::Pdf::open()` + `to_markdown(page)`. Best-effort, loses some structure. |
