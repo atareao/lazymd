@@ -1,12 +1,91 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use ratatui::style::Color;
+
 /// User-facing settings persisted to TOML.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[allow(dead_code)]
 pub struct Settings {
     pub last_directory: Option<PathBuf>,
     pub theme: Option<String>,
+}
+
+/// A set of colors used throughout the TUI.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Theme {
+    pub focus_border: Color,
+    pub directory: Color,
+    pub selection_bg: Color,
+    pub selection_fg: Color,
+    pub default_fg: Color,
+    pub dim_fg: Color,
+}
+
+impl Theme {
+    /// Dark theme (default).
+    pub const fn dark() -> Self {
+        Self {
+            focus_border: Color::Cyan,
+            directory: Color::Yellow,
+            selection_bg: Color::Cyan,
+            selection_fg: Color::Black,
+            default_fg: Color::Reset,
+            dim_fg: Color::DarkGray,
+        }
+    }
+
+    /// Light theme — higher contrast.
+    pub const fn light() -> Self {
+        Self {
+            focus_border: Color::Blue,
+            directory: Color::Magenta,
+            selection_bg: Color::Blue,
+            selection_fg: Color::White,
+            default_fg: Color::Reset,
+            dim_fg: Color::Gray,
+        }
+    }
+
+    /// Dracula-inspired theme.
+    pub const fn dracula() -> Self {
+        Self {
+            focus_border: Color::Rgb(189, 147, 249), // purple
+            directory: Color::Rgb(80, 250, 123),     // green
+            selection_bg: Color::Rgb(189, 147, 249), // purple
+            selection_fg: Color::Black,
+            default_fg: Color::Reset,
+            dim_fg: Color::Rgb(98, 114, 164), // comment gray
+        }
+    }
+
+    /// Solarized light theme.
+    pub const fn solarized() -> Self {
+        Self {
+            focus_border: Color::Rgb(38, 139, 210), // blue
+            directory: Color::Rgb(181, 137, 0),     // yellow
+            selection_bg: Color::Rgb(38, 139, 210),
+            selection_fg: Color::Rgb(253, 246, 227), // base3
+            default_fg: Color::Reset,
+            dim_fg: Color::Rgb(147, 161, 161), // base1
+        }
+    }
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::dark()
+    }
+}
+
+/// Map a theme string to a Theme struct.
+pub fn theme_from_string(name: &str) -> Theme {
+    match name.to_lowercase().as_str() {
+        "light" => Theme::light(),
+        "dracula" => Theme::dracula(),
+        "solarized" => Theme::solarized(),
+        _ => Theme::dark(),
+    }
 }
 
 /// Discover the config directory via XDG conventions.

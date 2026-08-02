@@ -3,6 +3,7 @@ pub mod help_popup;
 pub mod layout;
 pub mod log_panel;
 pub mod preview_panel;
+pub mod settings_panel;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -19,5 +20,9 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 
     if app.mode == crate::app::Mode::Help {
         help_popup::draw(frame, area);
+    }
+
+    if app.mode == crate::app::Mode::Settings {
+        settings_panel::draw(frame, area, app);
     }
 }

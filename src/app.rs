@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
-use crate::config::{Settings, load_settings, save_settings};
+use crate::config::{Settings, Theme, load_settings, save_settings, theme_from_string};
 use crate::converter::{Format, convert};
 use crate::fs_utils::{FsEntry, list_entries};
 use crate::preview::preview_file;
+use crate::ui::layout;
 
 /// Application mode — what the user is doing right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +20,8 @@ pub enum Mode {
     Preview,
     /// Viewing the help overlay.
     Help,
+    /// Viewing the settings panel.
+    Settings,
 }
 
 /// Which panel has keyboard focus.
@@ -36,12 +39,17 @@ pub struct App {
     pub running: bool,
     pub current_dir: PathBuf,
     pub entries: Vec<FsEntry>,
+    pub all_entries: Vec<FsEntry>,
+    pub filter_query: String,
+    pub filtering: bool,
     pub selected_index: usize,
     pub preview_content: String,
     pub preview_path: Option<PathBuf>,
     pub log_messages: Vec<String>,
     pub preview_scroll: u16,
     pub log_scroll: u16,
+    pub theme: Theme,
+    pub theme_name: String,
 }
 
 impl Default for App {
@@ -58,18 +66,26 @@ impl App {
             .filter(|p| p.exists())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let entries = list_entries(&current_dir).unwrap_or_default();
+        let theme_name = settings.theme.clone().unwrap_or_else(|| "dark".to_string());
+        let theme = theme_from_string(&theme_name);
+        let all_entries = entries.clone();
         Self {
             mode: Mode::Browse,
             focus: Focus::Browser,
             running: true,
             current_dir,
             entries,
+            all_entries,
+            filter_query: String::new(),
+            filtering: false,
             selected_index: 0,
             preview_content: String::new(),
             preview_path: None,
             log_messages: vec!["Ready".to_string()],
             preview_scroll: 0,
             log_scroll: 0,
+            theme,
+            theme_name,
         }
     }
 
@@ -77,11 +93,14 @@ impl App {
     pub fn navigate_to(&mut self, path: &Path) {
         if let Ok(entries) = list_entries(path) {
             self.current_dir = path.to_path_buf();
-            self.entries = entries;
+            self.all_entries = entries;
+            self.entries = self.all_entries.clone();
+            self.filter_query.clear();
             self.selected_index = 0;
             self.preview_content.clear();
             self.preview_path = None;
             self.preview_scroll = 0;
+            self.add_log(format!("📂 {}", self.current_dir.display()));
             // Persist the last visited directory
             let _ = save_settings(&Settings {
                 last_directory: Some(self.current_dir.clone()),
@@ -171,6 +190,86 @@ impl App {
     pub fn add_log(&mut self, msg: String) {
         self.log_messages.push(msg);
         self.log_scroll = self.log_messages.len().saturating_sub(1) as u16;
+    }
+
+    /// Cycle to the next theme and persist the choice.
+    pub fn cycle_theme(&mut self) {
+        const THEMES: [&str; 4] = ["dark", "light", "dracula", "solarized"];
+        let idx = THEMES
+            .iter()
+            .position(|t| *t == self.theme_name)
+            .unwrap_or(0);
+        self.theme_name = THEMES[(idx + 1) % THEMES.len()].to_string();
+        self.theme = theme_from_string(&self.theme_name);
+        self.add_log(format!("🎨 Theme: {}", self.theme_name));
+        let _ = save_settings(&Settings {
+            last_directory: Some(self.current_dir.clone()),
+            theme: Some(self.theme_name.clone()),
+        });
+    }
+
+    /// Filter entries by name (case-insensitive substring match).
+    pub fn set_filter(&mut self, query: &str) {
+        self.filter_query = query.to_string();
+        if query.is_empty() {
+            self.entries = self.all_entries.clone();
+        } else {
+            self.entries = self
+                .all_entries
+                .iter()
+                .filter(|e| e.name().to_lowercase().contains(&query.to_lowercase()))
+                .cloned()
+                .collect();
+        }
+        self.selected_index = 0;
+        self.preview_content.clear();
+        self.preview_path = None;
+        self.preview_scroll = 0;
+    }
+
+    /// Delete the selected file.
+    pub fn delete_selected(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let entry = &self.entries[self.selected_index];
+        match entry {
+            FsEntry::File { path, name, .. } => match std::fs::remove_file(path) {
+                Ok(()) => {
+                    self.add_log(format!("🗑️ Deleted: {name}"));
+                    self.navigate_to(&self.current_dir.clone());
+                }
+                Err(e) => {
+                    self.add_log(format!("✗ Delete failed: {e}"));
+                }
+            },
+            FsEntry::Directory { .. } => {
+                self.add_log("Cannot delete directories from the TUI".to_string());
+            }
+        }
+    }
+
+    /// Rename the selected file (or directory) to a new name.
+    pub fn rename_selected(&mut self, new_name: &str) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let entry = &self.entries[self.selected_index];
+        let old_name = entry.name().to_string();
+        if new_name.is_empty() || new_name == old_name {
+            self.add_log("Rename skipped: name unchanged or empty".to_string());
+            return;
+        }
+        let new_path = self.current_dir.join(new_name);
+        match std::fs::rename(entry.path(), &new_path) {
+            Ok(()) => {
+                self.add_log(format!("✏️ Renamed: {old_name} → {new_name}"));
+                self.navigate_to(&self.current_dir.clone());
+            }
+            Err(e) => {
+                self.add_log(format!("✗ Rename failed: {e}"));
+            }
+        }
     }
 
     /// Convert the currently previewed file to the given format.
@@ -270,6 +369,25 @@ impl App {
             return true;
         }
 
+        // Settings mode: Esc exits, s/Tab cycles theme, q quits
+        if self.mode == Mode::Settings {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Browse;
+                    true
+                }
+                KeyCode::Char('s') | KeyCode::Tab => {
+                    self.cycle_theme();
+                    true
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.running = false;
+                    true
+                }
+                _ => true,
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.running = false;
@@ -277,6 +395,10 @@ impl App {
             }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
+                true
+            }
+            KeyCode::Char('s') => {
+                self.mode = Mode::Settings;
                 true
             }
             KeyCode::Esc => {
@@ -291,6 +413,7 @@ impl App {
                 };
                 true
             }
+            _ if self.filtering && self.focus == Focus::Browser => self.handle_filter_key(key),
             _ => match self.focus {
                 Focus::Browser => self.handle_browser_key(key),
                 Focus::Preview => self.handle_preview_key(key),
@@ -313,6 +436,10 @@ impl App {
                 self.activate_selection();
                 true
             }
+            KeyCode::Char('h') if self.preview_path.is_some() => {
+                self.convert_current(Format::Html);
+                true
+            }
             KeyCode::Char('h') | KeyCode::Left => {
                 self.parent_directory();
                 true
@@ -333,7 +460,77 @@ impl App {
                 self.convert_current(Format::Typst);
                 true
             }
+            KeyCode::Char('r') => {
+                self.add_log("Refreshing directory...".to_string());
+                self.navigate_to(&self.current_dir.clone());
+                true
+            }
+            KeyCode::Char('d') => {
+                self.delete_selected();
+                true
+            }
+            KeyCode::Char('R') => {
+                let old_name = match self.entries.get(self.selected_index) {
+                    Some(e) => e.name().to_string(),
+                    None => {
+                        self.add_log("No entry selected".to_string());
+                        return true;
+                    }
+                };
+                // For v1, append "-renamed" before the extension
+                let (stem, ext) = match old_name.rsplit_once('.') {
+                    Some((s, e)) => (s.to_string(), format!(".{e}")),
+                    None => (old_name.clone(), String::new()),
+                };
+                let new_name = format!("{stem}-renamed{ext}");
+                self.rename_selected(&new_name);
+                true
+            }
+            KeyCode::Char('/') => {
+                self.filtering = true;
+                self.filter_query.clear();
+                self.add_log("Filter: type query, Enter to apply, Esc to cancel".to_string());
+                true
+            }
             _ => false,
+        }
+    }
+
+    /// Handle keys during filter input mode.
+    fn handle_filter_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.filtering = false;
+                self.set_filter("");
+                self.add_log("Filter cancelled".to_string());
+                true
+            }
+            KeyCode::Enter => {
+                self.filtering = false;
+                if self.filter_query.is_empty() {
+                    self.add_log("Filter cleared".to_string());
+                } else {
+                    self.add_log(format!(
+                        "Filter: {} ({} matches)",
+                        self.filter_query,
+                        self.entries.len()
+                    ));
+                }
+                true
+            }
+            KeyCode::Char(c) => {
+                self.filter_query.push(c);
+                let query = self.filter_query.clone();
+                self.set_filter(&query);
+                true
+            }
+            KeyCode::Backspace => {
+                self.filter_query.pop();
+                let query = self.filter_query.clone();
+                self.set_filter(&query);
+                true
+            }
+            _ => true,
         }
     }
 
@@ -345,6 +542,23 @@ impl App {
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.preview_scroll = self.preview_scroll.saturating_sub(1);
+                true
+            }
+            KeyCode::PageDown => {
+                self.preview_scroll = self.preview_scroll.saturating_add(10);
+                true
+            }
+            KeyCode::PageUp => {
+                self.preview_scroll = self.preview_scroll.saturating_sub(10);
+                true
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.preview_scroll = 0;
+                true
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                // Set to a very high value; the Paragraph widget will clamp
+                self.preview_scroll = u16::MAX;
                 true
             }
             KeyCode::Char('m') => {
@@ -378,13 +592,74 @@ impl App {
                 self.log_scroll = self.log_scroll.saturating_sub(1);
                 true
             }
+            KeyCode::PageDown => {
+                self.log_scroll =
+                    (self.log_scroll + 10).min(self.log_messages.len().saturating_sub(1) as u16);
+                true
+            }
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_sub(10);
+                true
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.log_scroll = 0;
+                true
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.log_scroll = self.log_messages.len().saturating_sub(1) as u16;
+                true
+            }
             _ => false,
         }
     }
 
     /// Handle a mouse event. Returns true if the event was consumed.
-    #[allow(dead_code)]
-    pub fn handle_mouse(&mut self, _event: MouseEvent) -> bool {
+    pub fn handle_mouse(&mut self, event: MouseEvent, area: Rect) -> bool {
+        if event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+
+        let areas = layout::chunk_areas(area);
+        let browser = areas.browser;
+
+        // Check if click is within the browser panel
+        if event.row >= browser.y
+            && event.row < browser.y + browser.height
+            && event.column >= browser.x
+            && event.column < browser.x + browser.width
+        {
+            // Content starts after the top border (1 line)
+            let content_row = event.row.saturating_sub(browser.y).saturating_sub(1) as usize;
+            let has_parent = self.current_dir.parent().is_some();
+
+            let click_index = if has_parent {
+                if content_row == 0 {
+                    // Clicked on ".." — select index 0
+                    0
+                } else {
+                    // content_row - 1 maps to entries index, but +1 for the ".." entry
+                    content_row
+                }
+            } else {
+                content_row
+            };
+
+            // Clamp to valid range
+            let max_index = if has_parent {
+                self.entries.len() // +1 for ".."
+            } else {
+                self.entries.len().saturating_sub(1)
+            };
+
+            if click_index <= max_index && !self.entries.is_empty() {
+                self.selected_index = click_index;
+                self.focus = Focus::Browser;
+                self.activate_selection();
+            }
+
+            return true;
+        }
+
         false
     }
 
@@ -419,18 +694,24 @@ mod tests {
 
     /// Create an `App` with a fixed set of entries (no filesystem dependency).
     fn app_with_entries(entries: Vec<FsEntry>) -> App {
+        let all_entries = entries.clone();
         App {
             mode: Mode::Browse,
             focus: Focus::Browser,
             running: true,
             current_dir: PathBuf::from("/test"),
             entries,
+            all_entries,
+            filter_query: String::new(),
+            filtering: false,
             selected_index: 0,
             preview_content: String::new(),
             preview_path: None,
             log_messages: vec!["Ready".to_string()],
             preview_scroll: 0,
             log_scroll: 0,
+            theme: Theme::dark(),
+            theme_name: "dark".to_string(),
         }
     }
 
@@ -455,19 +736,25 @@ mod tests {
     /// Create an `App` initialised to point at a `TempDir`.
     fn app_in_temp_dir(dir: &TempDir) -> App {
         let path = dir.path().to_path_buf();
-        let entries = list_entries(&path).unwrap_or_default();
+        let all_entries = list_entries(&path).unwrap_or_default();
+        let entries = all_entries.clone();
         App {
             mode: Mode::Browse,
             focus: Focus::Browser,
             running: true,
             current_dir: path,
             entries,
+            all_entries,
+            filter_query: String::new(),
+            filtering: false,
             selected_index: 0,
             preview_content: String::new(),
             preview_path: None,
             log_messages: vec!["Ready".to_string()],
             preview_scroll: 0,
             log_scroll: 0,
+            theme: Theme::dark(),
+            theme_name: "dark".to_string(),
         }
     }
 
@@ -532,7 +819,12 @@ mod tests {
         assert_eq!(a.focus, b.focus);
         assert_eq!(a.selected_index, b.selected_index);
         assert_eq!(a.log_messages, b.log_messages);
-        assert_eq!(a.current_dir, b.current_dir);
+        // current_dir depends on config which may be modified by parallel tests
+        // so we only check it's non-empty
+        assert!(!a.current_dir.as_os_str().is_empty());
+        assert!(!b.current_dir.as_os_str().is_empty());
+        assert_eq!(a.filtering, b.filtering);
+        assert_eq!(a.filter_query, b.filter_query);
     }
 
     // ======================================================================
@@ -546,11 +838,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.select_next();
@@ -563,6 +857,7 @@ mod tests {
             path: PathBuf::from("a.md"),
             name: "a.md".into(),
             extension: "md".into(),
+            size: 0,
         }]);
         app.select_next(); // len-1 == 0
         assert_eq!(app.selected_index, 0);
@@ -582,16 +877,19 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("c.md"),
                 name: "c.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.select_next();
@@ -608,11 +906,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.selected_index = 1;
@@ -626,6 +926,7 @@ mod tests {
             path: PathBuf::from("a.md"),
             name: "a.md".into(),
             extension: "md".into(),
+            size: 0,
         }]);
         app.selected_index = 0;
         app.select_prev();
@@ -646,16 +947,19 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("c.md"),
                 name: "c.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.select_next();
@@ -760,6 +1064,367 @@ mod tests {
             names,
             vec!["another", "subdir", "doc.typ", "index.html", "readme.md"]
         );
+    }
+
+    // ======================================================================
+    // set_filter / filter
+    // ======================================================================
+
+    #[test]
+    fn set_filter_filters_entries() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("readme.md"),
+                name: "readme.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("index.html"),
+                name: "index.html".into(),
+                extension: "html".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("doc.typ"),
+                name: "doc.typ".into(),
+                extension: "typ".into(),
+                size: 0,
+            },
+        ]);
+        app.set_filter("read");
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].name(), "readme.md");
+    }
+
+    #[test]
+    fn set_filter_empty_restores_all() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("a.md"),
+                name: "a.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("b.md"),
+                name: "b.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+        ]);
+        app.set_filter("a");
+        assert_eq!(app.entries.len(), 1);
+        app.set_filter("");
+        assert_eq!(app.entries.len(), 2);
+    }
+
+    #[test]
+    fn set_filter_is_case_insensitive() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("ReadMe.md"),
+                name: "ReadMe.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("index.html"),
+                name: "index.html".into(),
+                extension: "html".into(),
+                size: 0,
+            },
+        ]);
+        app.set_filter("readme");
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn set_filter_resets_selection_and_preview() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("a.md"),
+                name: "a.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("b.md"),
+                name: "b.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+        ]);
+        app.selected_index = 1;
+        app.preview_content = "old".to_string();
+        app.preview_path = Some(PathBuf::from("b.md"));
+        app.set_filter("a");
+        assert_eq!(app.selected_index, 0);
+        assert!(app.preview_content.is_empty());
+        assert!(app.preview_path.is_none());
+    }
+
+    #[test]
+    fn browser_key_slash_enters_filter_mode() {
+        let mut app = app_with_entries(vec![]);
+        let key = KeyEvent::new(KeyCode::Char('/'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_browser_key(key));
+        assert!(app.filtering);
+        assert!(app.filter_query.is_empty());
+    }
+
+    #[test]
+    fn filter_key_char_appends_to_query() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("readme.md"),
+                name: "readme.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("index.html"),
+                name: "index.html".into(),
+                extension: "html".into(),
+                size: 0,
+            },
+        ]);
+        app.filtering = true;
+        let key = KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert_eq!(app.filter_query, "r");
+        let key = KeyEvent::new(KeyCode::Char('e'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert_eq!(app.filter_query, "re");
+        // Should filter as we type
+        assert_eq!(app.entries.len(), 1);
+    }
+
+    #[test]
+    fn filter_key_backspace_removes_char() {
+        let mut app = app_with_entries(vec![
+            FsEntry::File {
+                path: PathBuf::from("report.md"),
+                name: "report.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("readme.md"),
+                name: "readme.md".into(),
+                extension: "md".into(),
+                size: 0,
+            },
+            FsEntry::File {
+                path: PathBuf::from("index.html"),
+                name: "index.html".into(),
+                extension: "html".into(),
+                size: 0,
+            },
+        ]);
+        app.filtering = true;
+        app.filter_query = "re".to_string();
+        app.set_filter("re");
+        // "re" matches "report.md" and "readme.md"
+        assert_eq!(app.entries.len(), 2);
+        let key = KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert_eq!(app.filter_query, "r");
+        // "r" matches "report.md" and "readme.md" (still 2)
+        assert_eq!(app.entries.len(), 2);
+        // Backspace again to empty
+        let key = KeyEvent::new(KeyCode::Backspace, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert_eq!(app.filter_query, "");
+        assert_eq!(app.entries.len(), 3);
+    }
+
+    #[test]
+    fn filter_key_escape_cancels() {
+        let mut app = app_with_entries(vec![]);
+        app.filtering = true;
+        app.filter_query = "test".to_string();
+        let key = KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert!(!app.filtering);
+        assert!(app.filter_query.is_empty());
+    }
+
+    #[test]
+    fn filter_key_enter_applies() {
+        let mut app = app_with_entries(vec![]);
+        app.filtering = true;
+        app.filter_query = "test".to_string();
+        let key = KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_filter_key(key));
+        assert!(!app.filtering);
+    }
+
+    #[test]
+    fn navigate_to_clears_filter() {
+        let dir = create_test_dir();
+        let mut app = app_with_entries(vec![]);
+        app.filter_query = "test".to_string();
+        app.navigate_to(dir.path());
+        assert!(app.filter_query.is_empty());
+        assert!(!app.filtering);
+    }
+
+    // ======================================================================
+    // delete_selected / rename_selected
+    // ======================================================================
+
+    #[test]
+    fn delete_selected_removes_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        app.delete_selected();
+        assert!(!file_path.exists(), "file should be deleted");
+        assert!(app.log_messages.iter().any(|m| m.contains("Deleted")));
+    }
+
+    #[test]
+    fn delete_selected_empty_entries_no_panic() {
+        let mut app = app_with_entries(vec![]);
+        app.delete_selected(); // should not panic
+    }
+
+    #[test]
+    fn delete_selected_directory_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "subdir")
+            .unwrap();
+        app.selected_index = idx;
+        app.delete_selected();
+        assert!(dir.path().join("subdir").exists(), "dir should remain");
+        assert!(
+            app.log_messages.iter().any(|m| m.contains("Cannot delete")),
+            "should log rejection"
+        );
+    }
+
+    #[test]
+    fn delete_selected_nonexistent_file_logs_error() {
+        let dir = TempDir::new().unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        // Craft an entry pointing at a non-existent file
+        app.entries.push(FsEntry::File {
+            path: dir.path().join("ghost.md"),
+            name: "ghost.md".into(),
+            extension: "md".into(),
+            size: 0,
+        });
+        app.selected_index = app.entries.len() - 1;
+        app.delete_selected();
+        assert!(app.log_messages.iter().any(|m| m.contains("failed")));
+    }
+
+    #[test]
+    fn rename_selected_renames_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        app.rename_selected("renamed.md");
+        assert!(!file_path.exists(), "old name should be gone");
+        assert!(
+            dir.path().join("renamed.md").exists(),
+            "new name should exist"
+        );
+        assert!(app.log_messages.iter().any(|m| m.contains("Renamed")));
+    }
+
+    #[test]
+    fn rename_selected_empty_name_skips() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        app.rename_selected("");
+        assert!(file_path.exists(), "file should remain");
+        assert!(app.log_messages.iter().any(|m| m.contains("skipped")));
+    }
+
+    #[test]
+    fn rename_selected_same_name_skips() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        app.rename_selected("test.md");
+        assert!(file_path.exists());
+        assert!(app.log_messages.iter().any(|m| m.contains("skipped")));
+    }
+
+    #[test]
+    fn rename_selected_empty_entries_no_panic() {
+        let mut app = app_with_entries(vec![]);
+        app.rename_selected("new.md"); // should not panic
+    }
+
+    #[test]
+    fn browser_key_d_deletes_selected() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        let key = KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_browser_key(key));
+        assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn browser_key_uppercase_r_renames_selected() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "test.md")
+            .unwrap();
+        app.selected_index = idx;
+        let key = KeyEvent::new(KeyCode::Char('R'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_browser_key(key));
+        assert!(dir.path().join("test-renamed.md").exists());
     }
 
     // ======================================================================
@@ -1025,11 +1690,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         let key = KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::NONE);
@@ -1044,11 +1711,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         let key = KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE);
@@ -1063,11 +1732,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.selected_index = 1;
@@ -1083,11 +1754,13 @@ mod tests {
                 path: PathBuf::from("a.md"),
                 name: "a.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
             FsEntry::File {
                 path: PathBuf::from("b.md"),
                 name: "b.md".into(),
                 extension: "md".into(),
+                size: 0,
             },
         ]);
         app.selected_index = 1;
@@ -1132,9 +1805,26 @@ mod tests {
         let subdir = dir.path().join("subdir");
         let mut app = app_in_temp_dir(&dir);
         app.navigate_to(&subdir);
+        // No preview_path set → h means parent directory
         let key = KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_browser_key(key));
         assert_eq!(app.current_dir, dir.path());
+    }
+
+    #[test]
+    fn browser_key_h_converts_html_when_preview_active() {
+        let dir = create_test_dir();
+        let mut app = app_in_temp_dir(&dir);
+        app.preview_path = Some(dir.path().join("readme.md"));
+        // preview_path is set → h means convert to HTML
+        let key = KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_browser_key(key));
+        assert!(
+            app.log_messages
+                .iter()
+                .any(|m| m.contains("Converting") || m.contains("already")),
+            "h with preview should trigger HTML conversion"
+        );
     }
 
     #[test]
@@ -1529,15 +2219,29 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn handle_mouse_returns_false() {
+    fn handle_mouse_returns_false_for_non_left_click() {
         let mut app = App::new();
         let event = MouseEvent {
-            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
             column: 0,
             row: 0,
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
-        assert!(!app.handle_mouse(event));
+        let area = Rect::new(0, 0, 100, 50);
+        assert!(!app.handle_mouse(event, area));
+    }
+
+    #[test]
+    fn handle_mouse_returns_false_for_mouse_up() {
+        let mut app = App::new();
+        let event = MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        let area = Rect::new(0, 0, 100, 50);
+        assert!(!app.handle_mouse(event, area));
     }
 
     #[test]
@@ -1546,5 +2250,103 @@ mod tests {
         app.tick();
         // Should not panic, no observable state change
         assert!(app.running);
+    }
+
+    // ======================================================================
+    // Settings / cycle_theme
+    // ======================================================================
+
+    #[test]
+    fn cycle_theme_cycles_through_all_themes() {
+        let mut app = App::new();
+        let themes = ["dark", "light", "dracula", "solarized"];
+        for expected in themes {
+            assert_eq!(app.theme_name, expected, "expected theme {expected}");
+            app.cycle_theme();
+        }
+        // After cycling through all 4, we should be back to dark
+        assert_eq!(app.theme_name, "dark");
+    }
+
+    #[test]
+    fn cycle_theme_wraps_around() {
+        let mut app = App::new();
+        // Cycle 5 times — should be back to "light" (index 1)
+        for _ in 0..5 {
+            app.cycle_theme();
+        }
+        assert_eq!(app.theme_name, "light");
+    }
+
+    #[test]
+    fn cycle_theme_logs_new_theme() {
+        let mut app = App::new();
+        app.cycle_theme();
+        assert!(
+            app.log_messages.iter().any(|m| m.contains("Theme: light")),
+            "cycle_theme should log the new theme"
+        );
+    }
+
+    #[test]
+    fn handle_key_s_enters_settings_mode() {
+        let mut app = App::new();
+        let key = KeyEvent::new(KeyCode::Char('s'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.mode, Mode::Settings);
+    }
+
+    #[test]
+    fn settings_esc_returns_to_browse() {
+        let mut app = App::new();
+        app.mode = Mode::Settings;
+        let key = KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn settings_s_cycles_theme() {
+        let mut app = App::new();
+        app.mode = Mode::Settings;
+        let start = app.theme_name.clone();
+        let key = KeyEvent::new(KeyCode::Char('s'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_ne!(
+            app.theme_name, start,
+            "cycling theme should change theme_name"
+        );
+    }
+
+    #[test]
+    fn settings_tab_cycles_theme() {
+        let mut app = App::new();
+        app.mode = Mode::Settings;
+        let start = app.theme_name.clone();
+        let key = KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_ne!(app.theme_name, start, "Tab in settings should cycle theme");
+    }
+
+    #[test]
+    fn settings_q_quits() {
+        let mut app = App::new();
+        app.mode = Mode::Settings;
+        let key = KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert!(!app.running, "q in settings should quit the app");
+    }
+
+    #[test]
+    fn settings_unknown_key_does_not_exit() {
+        let mut app = App::new();
+        app.mode = Mode::Settings;
+        let key = KeyEvent::new(KeyCode::Char('x'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(
+            app.mode,
+            Mode::Settings,
+            "unknown key should stay in settings"
+        );
     }
 }

@@ -8,12 +8,13 @@ use crate::app::{App, Focus};
 /// Draw the log / status panel at the bottom of the screen.
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let is_focused = app.focus == Focus::Log;
+    let theme = &app.theme;
 
     let block = Block::default()
         .title(" Log ")
         .borders(Borders::ALL)
         .border_style(if is_focused {
-            Style::default().fg(ratatui::style::Color::Cyan)
+            Style::default().fg(theme.focus_border)
         } else {
             Style::default()
         });

@@ -8,24 +8,46 @@ const HELP_TEXT: &str = concat!(
     "┌─────────────────────────────────────────────┐\n",
     "│                 Help                        │\n",
     "├─────────────────────────────────────────────┤\n",
+    "│  Global                                     │\n",
     "│  q / Ctrl+q    Quit                         │\n",
+    "│  s             Settings (cycle theme)       │\n",
     "│  Tab           Cycle focus                  │\n",
+    "│  ? / Esc       Toggle help / close preview  │\n",
+    "│                                             │\n",
+    "│  Browser (file tree)                        │\n",
     "│  j / ↓         Move cursor down             │\n",
     "│  k / ↑         Move cursor up               │\n",
     "│  Enter         Open directory / file        │\n",
     "│  h / ←         Parent directory             │\n",
     "│  l / →         Enter directory              │\n",
-    "│  m             Convert to Markdown          │\n",
-    "│  h             Convert to HTML              │\n",
-    "│  p             Convert to PDF               │\n",
-    "│  t             Convert Typst to PDF/HTML    │\n",
-    "│  ? / Esc       Toggle help                  │\n",
+    "│  r             Refresh directory             │\n",
+    "│  /             Filter entries (type + Enter)  │\n",
+    "│  d             Delete selected file            │\n",
+    "│  R             Rename selected file            │\n",
+    "│  m / p / t     Convert to MD / PDF / Typst  │\n",
+    "│                                             │\n",
+    "│  Preview (file viewer)                      │\n",
+    "│  j / ↓         Scroll down                  │\n",
+    "│  k / ↑         Scroll up                    │\n",
+    "│  PageDown      Scroll down 10 lines         │\n",
+    "│  PageUp        Scroll up 10 lines           │\n",
+    "│  g / Home      Scroll to top                │\n",
+    "│  G / End       Scroll to bottom             │\n",
+    "│  m / h / p / t Convert to MD/HTML/PDF/Typst │\n",
+    "│                                             │\n",
+    "│  Log panel                                  │\n",
+    "│  j / ↓         Scroll down                  │\n",
+    "│  k / ↑         Scroll up                    │\n",
+    "│  PageDown      Scroll down 10 lines         │\n",
+    "│  PageUp        Scroll up 10 lines           │\n",
+    "│  g / Home      Scroll to top                │\n",
+    "│  G / End       Scroll to bottom             │\n",
     "└─────────────────────────────────────────────┘",
 );
 
 /// Draw the help popup overlay.
 pub fn draw(frame: &mut Frame, area: Rect) {
-    let popup_area = centered_rect(50, 16, area);
+    let popup_area = centered_rect(55, 55, area);
 
     frame.render_widget(Clear, popup_area);
 

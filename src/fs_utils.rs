@@ -11,6 +11,7 @@ pub enum FsEntry {
         path: PathBuf,
         name: String,
         extension: String,
+        size: u64,
     },
 }
 
@@ -32,10 +33,12 @@ pub fn list_entries(path: &Path) -> std::io::Result<Vec<FsEntry>> {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_string();
+            let size = entry.metadata()?.len();
             files.push(FsEntry::File {
                 path,
                 name,
                 extension: ext,
+                size,
             });
         }
     }
@@ -54,6 +57,19 @@ pub fn is_supported_file(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("md" | "markdown" | "html" | "htm" | "pdf" | "typ")
     )
+}
+
+/// Format a file size in human-readable form (B, KB, MB).
+pub fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
 }
 
 impl FsEntry {
@@ -167,6 +183,7 @@ mod tests {
             path: PathBuf::from("/some/path/doc.md"),
             name: "doc.md".to_string(),
             extension: "md".to_string(),
+            size: 0,
         };
         assert_eq!(entry.name(), "doc.md");
     }
@@ -178,6 +195,7 @@ mod tests {
             path: p.clone(),
             name: "doc.md".to_string(),
             extension: "md".to_string(),
+            size: 0,
         };
         assert_eq!(entry.path(), p);
     }
