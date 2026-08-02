@@ -61,10 +61,7 @@ impl Default for App {
 impl App {
     pub fn new() -> Self {
         let settings = load_settings();
-        let current_dir = settings
-            .last_directory
-            .filter(|p| p.exists())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let entries = list_entries(&current_dir).unwrap_or_default();
         let theme_name = settings.theme.clone().unwrap_or_else(|| "dark".to_string());
         let theme = theme_from_string(&theme_name);
@@ -114,7 +111,12 @@ impl App {
     /// Move selection down.
     pub fn select_next(&mut self) {
         if !self.entries.is_empty() {
-            self.selected_index = (self.selected_index + 1).min(self.entries.len() - 1);
+            let max_index = if self.current_dir.parent().is_some() {
+                self.entries.len() // visual index includes ".." at 0
+            } else {
+                self.entries.len().saturating_sub(1)
+            };
+            self.selected_index = (self.selected_index + 1).min(max_index);
         }
     }
 
@@ -125,16 +127,50 @@ impl App {
         }
     }
 
+    /// Return the real entry index (adjusted for ".." virtual entry).
+    fn real_selected_index(&self) -> Option<usize> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let has_parent = self.current_dir.parent().is_some();
+        let idx = if has_parent {
+            self.selected_index.saturating_sub(1)
+        } else {
+            self.selected_index
+        };
+        if idx < self.entries.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
     /// Enter the selected directory, or preview the selected file.
     pub fn activate_selection(&mut self) {
         if self.entries.is_empty() {
             return;
         }
-        let path = self.entries[self.selected_index].path().to_path_buf();
-        let is_dir = matches!(
-            &self.entries[self.selected_index],
-            FsEntry::Directory { .. }
-        );
+        // Adjust index: the browser panel shows a virtual ".." entry at index 0
+        // when the current directory has a parent. The actual entries start at
+        // visual index 1 in that case.
+        let has_parent = self.current_dir.parent().is_some();
+        if has_parent && self.selected_index == 0 {
+            // ".." entry — go to parent directory
+            self.parent_directory();
+            return;
+        }
+        let entry_index = if has_parent {
+            self.selected_index.saturating_sub(1)
+        } else {
+            self.selected_index
+        };
+
+        if entry_index >= self.entries.len() {
+            return;
+        }
+
+        let path = self.entries[entry_index].path().to_path_buf();
+        let is_dir = matches!(&self.entries[entry_index], FsEntry::Directory { .. });
 
         if is_dir {
             self.navigate_to(&path);
@@ -172,17 +208,11 @@ impl App {
         if has_parent && self.selected_index == 0 {
             // The ".." entry is at index 0
             self.parent_directory();
-        } else if !self.entries.is_empty() {
-            let entry_index = if has_parent {
-                self.selected_index.saturating_sub(1)
-            } else {
-                self.selected_index
-            };
-            if entry_index < self.entries.len()
-                && let FsEntry::Directory { .. } = &self.entries[entry_index]
-            {
-                self.activate_selection();
-            }
+        } else if let Some(entry_idx) = self.real_selected_index()
+            && entry_idx < self.entries.len()
+            && let FsEntry::Directory { .. } = &self.entries[entry_idx]
+        {
+            self.activate_selection();
         }
     }
 
@@ -229,10 +259,11 @@ impl App {
 
     /// Delete the selected file.
     pub fn delete_selected(&mut self) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let entry = &self.entries[self.selected_index];
+        let entry_idx = match self.real_selected_index() {
+            Some(idx) => idx,
+            None => return,
+        };
+        let entry = &self.entries[entry_idx];
         match entry {
             FsEntry::File { path, name, .. } => match std::fs::remove_file(path) {
                 Ok(()) => {
@@ -251,10 +282,11 @@ impl App {
 
     /// Rename the selected file (or directory) to a new name.
     pub fn rename_selected(&mut self, new_name: &str) {
-        if self.entries.is_empty() {
-            return;
-        }
-        let entry = &self.entries[self.selected_index];
+        let entry_idx = match self.real_selected_index() {
+            Some(idx) => idx,
+            None => return,
+        };
+        let entry = &self.entries[entry_idx];
         let old_name = entry.name().to_string();
         if new_name.is_empty() || new_name == old_name {
             self.add_log("Rename skipped: name unchanged or empty".to_string());
@@ -470,13 +502,14 @@ impl App {
                 true
             }
             KeyCode::Char('R') => {
-                let old_name = match self.entries.get(self.selected_index) {
-                    Some(e) => e.name().to_string(),
+                let entry_idx = match self.real_selected_index() {
+                    Some(idx) => idx,
                     None => {
                         self.add_log("No entry selected".to_string());
                         return true;
                     }
                 };
+                let old_name = self.entries[entry_idx].name().to_string();
                 // For v1, append "-renamed" before the extension
                 let (stem, ext) = match old_name.rsplit_once('.') {
                     Some((s, e)) => (s.to_string(), format!(".{e}")),
@@ -859,8 +892,8 @@ mod tests {
             extension: "md".into(),
             size: 0,
         }]);
-        app.select_next(); // len-1 == 0
-        assert_eq!(app.selected_index, 0);
+        app.select_next(); // has_parent so max=1
+        assert_eq!(app.selected_index, 1);
     }
 
     #[test]
@@ -896,7 +929,7 @@ mod tests {
         app.select_next();
         assert_eq!(app.selected_index, 2);
         app.select_next(); // at bound
-        assert_eq!(app.selected_index, 2);
+        assert_eq!(app.selected_index, 3);
     }
 
     #[test]
@@ -1479,7 +1512,8 @@ mod tests {
             .iter()
             .position(|e| matches!(e, FsEntry::Directory { name, .. } if name == "subdir"))
             .expect("subdir entry should exist");
-        app.selected_index = idx;
+        let has_parent = app.current_dir.parent().is_some();
+        app.selected_index = if has_parent { idx + 1 } else { idx };
         app.activate_selection();
         assert_eq!(app.current_dir, dir.path().join("subdir"));
         assert_eq!(app.mode, Mode::Browse);
@@ -1494,7 +1528,8 @@ mod tests {
             .iter()
             .position(|e| matches!(e, FsEntry::File { name, .. } if name == "readme.md"))
             .expect("readme.md should exist");
-        app.selected_index = idx;
+        let has_parent = app.current_dir.parent().is_some();
+        app.selected_index = if has_parent { idx + 1 } else { idx };
         app.activate_selection();
         assert_eq!(app.mode, Mode::Preview);
         assert_eq!(app.focus, Focus::Preview);
@@ -1511,7 +1546,8 @@ mod tests {
             .iter()
             .position(|e| matches!(e, FsEntry::File { name, .. } if name == "readme.md"))
             .expect("readme.md should exist");
-        app.selected_index = idx;
+        let has_parent = app.current_dir.parent().is_some();
+        app.selected_index = if has_parent { idx + 1 } else { idx };
         app.activate_selection();
         assert_eq!(app.preview_content, "# Hello");
     }
@@ -1544,16 +1580,14 @@ mod tests {
     fn enter_child_directory_selects_subdirectory() {
         let dir = create_test_dir();
         let mut app = app_in_temp_dir(&dir);
-        // enter_child_directory treats selected_index 0 as ".." (parent)
-        // when has_parent is true. selected_index=1 maps to entries[1]
-        // (activate_selection uses the raw index).
+        // With has_parent=true, visual index 0 = "..", 1 = entries[0], 2 = entries[1]
         let second_entry_name = app.entries[1].name().to_string();
-        app.selected_index = 1;
+        app.selected_index = 2; // visual index for entries[1]
         app.enter_child_directory();
         assert_eq!(
             app.current_dir,
             dir.path().join(&second_entry_name),
-            "should enter entries[1] via selected_index=1"
+            "should enter entries[1] via visual index 2"
         );
     }
 
@@ -1793,7 +1827,8 @@ mod tests {
             .iter()
             .position(|e| e.name() == "subdir")
             .expect("subdir should exist");
-        app.selected_index = idx;
+        let has_parent = app.current_dir.parent().is_some();
+        app.selected_index = if has_parent { idx + 1 } else { idx };
         let key = KeyEvent::new(KeyCode::Enter, crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_browser_key(key));
         assert_eq!(app.current_dir, dir.path().join("subdir"));
@@ -1842,16 +1877,15 @@ mod tests {
     fn browser_key_l_enters_child() {
         let dir = create_test_dir();
         let mut app = app_in_temp_dir(&dir);
-        // enter_child_directory treats index 0 as ".." when has_parent=true.
-        // selected_index=1 → entries[1] via activate_selection.
+        // With has_parent=true, visual index 0 = "..", 1 = entries[0], 2 = entries[1]
         let entry_name = app.entries[1].name().to_string();
-        app.selected_index = 1;
+        app.selected_index = 2; // visual index for entries[1]
         let key = KeyEvent::new(KeyCode::Char('l'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_browser_key(key));
         assert_eq!(
             app.current_dir,
             dir.path().join(&entry_name),
-            "'l' should enter the entry at selected_index=1"
+            "'l' should enter the entry at visual index 2 (entries[1])"
         );
     }
 
@@ -1860,13 +1894,13 @@ mod tests {
         let dir = create_test_dir();
         let mut app = app_in_temp_dir(&dir);
         let entry_name = app.entries[1].name().to_string();
-        app.selected_index = 1;
+        app.selected_index = 2; // visual index for entries[1]
         let key = KeyEvent::new(KeyCode::Right, crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_browser_key(key));
         assert_eq!(
             app.current_dir,
             dir.path().join(&entry_name),
-            "'right' should enter the entry at selected_index=1"
+            "'right' should enter the entry at visual index 2 (entries[1])"
         );
     }
 
