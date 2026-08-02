@@ -304,13 +304,26 @@ impl App {
         }
     }
 
-    /// Convert the currently previewed file to the given format.
+    /// Convert the currently previewed (or selected) file to the given format.
     pub fn convert_current(&mut self, target: Format) {
         let input = match &self.preview_path {
             Some(p) => p.clone(),
             None => {
-                self.add_log("No file selected for conversion".to_string());
-                return;
+                // Fall back to the selected entry in the browser
+                let entry_idx = match self.real_selected_index() {
+                    Some(idx) => idx,
+                    None => {
+                        self.add_log("No file selected for conversion".to_string());
+                        return;
+                    }
+                };
+                match &self.entries[entry_idx] {
+                    FsEntry::File { path, .. } => path.clone(),
+                    _ => {
+                        self.add_log("Selected item is not a file".to_string());
+                        return;
+                    }
+                }
             }
         };
 
@@ -1946,6 +1959,47 @@ mod tests {
     }
 
     #[test]
+    fn convert_current_uses_selected_file_when_no_preview() {
+        let dir = create_test_dir();
+        let mut app = app_in_temp_dir(&dir);
+        // Select readme.md in the browser WITHOUT activating it (no preview_path)
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "readme.md")
+            .expect("readme.md should exist");
+        app.selected_index = idx + 1; // visual index (".." at 0)
+        app.preview_path = None;
+        assert!(app.preview_path.is_none());
+        // Convert MD → PDF without opening the file
+        app.convert_current(Format::Pdf);
+        let log = app.log_messages.join(" ");
+        assert!(
+            log.contains("Converting") || log.contains("already"),
+            "should convert the selected file, got: {log}"
+        );
+    }
+
+    #[test]
+    fn convert_current_selected_directory_logs_not_a_file() {
+        let dir = create_test_dir();
+        let mut app = app_in_temp_dir(&dir);
+        // Select a directory (subdir) without previewing
+        let idx = app
+            .entries
+            .iter()
+            .position(|e| e.name() == "subdir")
+            .expect("subdir should exist");
+        app.selected_index = idx + 1; // visual index
+        app.preview_path = None;
+        app.convert_current(Format::Pdf);
+        assert!(
+            app.log_messages.iter().any(|m| m.contains("not a file")),
+            "selecting a directory should log 'not a file'"
+        );
+    }
+
+    #[test]
     fn browser_key_m_triggers_convert() {
         let dir = create_test_dir();
         let mut app = app_in_temp_dir(&dir);
@@ -2052,6 +2106,7 @@ mod tests {
     #[test]
     fn preview_key_m_converts() {
         let mut app = App::new();
+        app.entries = vec![];
         let key = KeyEvent::new(KeyCode::Char('m'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_preview_key(key));
         assert!(
@@ -2065,6 +2120,7 @@ mod tests {
     #[test]
     fn preview_key_h_converts() {
         let mut app = App::new();
+        app.entries = vec![];
         let key = KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_preview_key(key));
         assert!(
@@ -2078,6 +2134,7 @@ mod tests {
     #[test]
     fn preview_key_p_converts() {
         let mut app = App::new();
+        app.entries = vec![];
         let key = KeyEvent::new(KeyCode::Char('p'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_preview_key(key));
         assert!(
@@ -2091,6 +2148,7 @@ mod tests {
     #[test]
     fn preview_key_t_converts() {
         let mut app = App::new();
+        app.entries = vec![];
         let key = KeyEvent::new(KeyCode::Char('t'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_preview_key(key));
         assert!(
@@ -2189,6 +2247,7 @@ mod tests {
     fn convert_current_no_preview_path_logs() {
         let mut app = App::new();
         app.preview_path = None;
+        app.entries = vec![]; // ensure no entries to fall back on
         app.convert_current(Format::Html);
         assert!(
             app.log_messages

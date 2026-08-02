@@ -1,582 +1,191 @@
-# lazymd — Phase 4 Implementation Plan
+# lazymd — Phase 5 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Complete the remaining UX gaps, documentation, and quality-of-life features for the lazymd TUI.
+**Goal:** Complete the remaining UX improvements, file operations, navigation enhancements, and engineering infrastructure.
 
-**Architecture:** Incremental improvements to existing files — no new modules. Each task is self-contained and independently testable.
+**Architecture:** Incremental improvements to existing files. Each task is self-contained and independently testable. Tasks are ordered by value/effort ratio (P1 first).
 
-**Tech Stack:** Rust + ratatui 0.29 + crossterm 0.28
+**Tech Stack:** Rust + ratatui 0.29 + crossterm 0.28 + typst-syntax 0.15 (new dep)
 
 ## Global Constraints
 
 - All conversions use Rust crates — never shell out to system tools
 - `cargo clippy` must pass with zero warnings after every task
 - `cargo fmt` must pass after every task
-- `cargo test` must pass after every task (currently 206 tests)
+- `cargo test` must pass after every task (currently 237 tests)
 - Edition 2024 (rustc ≥ 1.85)
-- No new dependencies unless explicitly justified
+- No new dependencies unless explicitly justified (justified: `typst-syntax` for Typst highlighting)
+- `FsEntry` enum: `Directory { path: PathBuf, name: String }`, `File { path: PathBuf, name: String, extension: String, size: u64 }`
+- `App` struct fields: `mode, focus, running, current_dir, entries, all_entries, filter_query, filtering, selected_index, preview_content, preview_path, log_messages, preview_scroll, log_scroll, theme, theme_name`
+- Test helpers: `app_with_entries(entries: Vec<FsEntry>) -> App`, `app_in_temp_dir(dir: &TempDir) -> App`, `create_test_dir() -> TempDir`
 
 ---
 
-### Task 1: Complete Help Popup Keybindings
+### Task 1: Status Bar (P1)
 
 **Files:**
-- Modify: `src/ui/help_popup.rs:7-24`
-- Test: `cargo check` (visual only, no unit tests needed for static text)
+- Create: `src/ui/status_panel.rs`
+- Modify: `src/ui/layout.rs:11-27`, `src/ui/mod.rs:1-23`, `src/app.rs:36-53`
 
 **Interfaces:**
-- Consumes: `HELP_TEXT` constant
-- Produces: Updated `HELP_TEXT` constant
+- Consumes: `App` struct (selected_index, entries, current_dir, theme, preview_path), `PanelAreas` struct, `chunk_areas(Rect) -> PanelAreas`
+- Produces: `PanelAreas { browser, preview, log, status }`, `status_panel::draw(frame, area, app)`, `App::status_line(&self) -> String`
 
-The help popup is missing several keybindings that are already implemented in `app.rs`. Update the `HELP_TEXT` constant to include all active keybindings and clarify the `h` key context ambiguity.
+Add a 1-row status bar at the very bottom showing: selected file name, size, type (from extension). For PDFs, also show page count (computed lazily, cached). The status bar is always visible.
 
-- [ ] **Step 1: Audit current keybindings in app.rs**
-
-Read `src/app.rs` lines 262-422 to catalog every active keybinding:
-
-| Key | Context | Action |
-|-----|---------|--------|
-| `q` / `Q` | global | Quit |
-| `?` | global | Toggle help |
-| `Esc` | global | Return to Browse mode |
-| `Tab` | global | Cycle focus (Browser → Preview → Log) |
-| `j` / `↓` | Browser | Select next entry |
-| `k` / `↑` | Browser | Select previous entry |
-| `Enter` | Browser | Open directory / preview file |
-| `h` / `←` | Browser | Parent directory |
-| `l` / `→` | Browser | Enter child directory |
-| `m` | Browser/Preview | Convert to Markdown |
-| `p` | Browser/Preview | Convert to PDF |
-| `t` | Browser/Preview | Convert Typst to PDF/HTML |
-| `r` | Browser | Refresh directory |
-| `j` / `↓` | Preview | Scroll down |
-| `k` / `↑` | Preview | Scroll up |
-| `h` | Preview | Convert to HTML |
-| `PageDown` | Preview/Log | Scroll 10 lines down |
-| `PageUp` | Preview/Log | Scroll 10 lines up |
-| `g` / `Home` | Preview/Log | Scroll to top |
-| `G` / `End` | Preview/Log | Scroll to bottom |
-
-- [ ] **Step 2: Rewrite HELP_TEXT**
-
-Replace the current `HELP_TEXT` constant with a complete version:
+- [ ] **Step 1: Add status field to PanelAreas and update layout**
 
 ```rust
-const HELP_TEXT: &str = concat!(
-    "┌─────────────────────────────────────────────┐\n",
-    "│                 Help                        │\n",
-    "├─────────────────────────────────────────────┤\n",
-    "│  Navigation                                 │\n",
-    "│  j / ↓         Move down                    │\n",
-    "│  k / ↑         Move up                      │\n",
-    "│  h / ←         Parent dir (Browser)         │\n",
-    "│  l / →         Enter dir (Browser)          │\n",
-    "│  Enter          Open file / directory        │\n",
-    "│  r              Refresh directory            │\n",
-    "│                                              │\n",
-    "│  Preview Scrolling                           │\n",
-    "│  j / ↓         Scroll down                  │\n",
-    "│  k / ↑         Scroll up                    │\n",
-    "│  PageDown       Scroll 10 lines down         │\n",
-    "│  PageUp         Scroll 10 lines up           │\n",
-    "│  g / Home       Scroll to top                │\n",
-    "│  G / End        Scroll to bottom             │\n",
-    "│                                              │\n",
-    "│  Conversions                                 │\n",
-    "│  m              Convert to Markdown          │\n",
-    "│  h              Convert to HTML (Preview)    │\n",
-    "│  p              Convert to PDF               │\n",
-    "│  t              Convert Typst to PDF/HTML    │\n",
-    "│                                              │\n",
-    "│  General                                     │\n",
-    "│  Tab            Cycle focus                  │\n",
-    "│  Esc            Back to Browse               │\n",
-    "│  ? / Esc        Toggle help                  │\n",
-    "│  q / Ctrl+q     Quit                         │\n",
-    "└─────────────────────────────────────────────┘",
-);
-```
-
-- [ ] **Step 3: Update popup height**
-
-The popup now has more lines. Update the `centered_rect(50, 16, area)` call to use a larger height (e.g., `26`):
-
-```rust
-let popup_area = centered_rect(55, 26, area);
-```
-
-- [ ] **Step 4: Verify**
-
-```bash
-cargo check && cargo clippy && cargo fmt && cargo test
-```
-
-Expected: zero warnings, 206+ tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/ui/help_popup.rs
-git commit -m "feat: complete help popup with all keybindings"
-```
-
----
-
-### Task 2: Add `h` (HTML conversion) to Browser key handler
-
-**Files:**
-- Modify: `src/app.rs:302-343`
-- Test: `src/app.rs` (add test for browser_key_h_converts_to_html)
-
-**Interfaces:**
-- Consumes: `App::handle_browser_key(&mut self, key: KeyEvent) -> bool`
-- Produces: `h` key now converts to HTML in browser focus (when a file is previewed)
-
-Currently `h` in browser focus only does "parent directory". The `h` for HTML conversion only works in preview focus. Add `h` as an HTML conversion trigger in browser focus too, but only when `mode == Mode::Preview` (i.e., a file is already open). When in `Mode::Browse`, `h` remains "parent directory".
-
-- [ ] **Step 1: Write the failing test**
-
-Add to `src/app.rs` in the `handle_browser_key` test section:
-
-```rust
-#[test]
-fn browser_key_h_converts_html_in_preview_mode() {
-    let mut app = App::new();
-    app.mode = Mode::Preview;
-    app.preview_path = Some(PathBuf::from("test.md"));
-    let key = KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::NONE);
-    assert!(app.handle_browser_key(key));
-    assert!(
-        app.log_messages
-            .iter()
-            .any(|m| m.contains("Converting") || m.contains("already")),
-        "h in browser+preview mode should trigger HTML conversion"
-    );
+// src/ui/layout.rs
+pub struct PanelAreas {
+    pub browser: Rect,
+    pub preview: Rect,
+    pub log: Rect,
+    pub status: Rect,
 }
 
-#[test]
-fn browser_key_h_parent_dir_in_browse_mode() {
-    let dir = create_test_dir();
-    let subdir = dir.path().join("subdir");
-    let mut app = app_in_temp_dir(&dir);
-    app.mode = Mode::Browse;
-    app.navigate_to(&subdir);
-    let key = KeyEvent::new(KeyCode::Char('h'), crossterm::event::KeyModifiers::NONE);
-    assert!(app.handle_browser_key(key));
-    assert_eq!(app.current_dir, dir.path(), "h in browse mode should go to parent");
-}
-```
+pub fn chunk_areas(area: Rect) -> PanelAreas {
+    let main = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(6), Constraint::Length(1)])
+        .split(area);
 
-- [ ] **Step 2: Run test to verify it fails**
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
+        .split(main[0]);
 
-```bash
-cargo test browser_key_h_converts_html_in_preview_mode -- --nocapture
-```
-
-Expected: FAIL — `h` currently only does parent directory.
-
-- [ ] **Step 3: Implement dual behavior for `h`**
-
-In `handle_browser_key`, change the `h` handler:
-
-```rust
-KeyCode::Char('h') | KeyCode::Left => {
-    if self.mode == Mode::Preview {
-        self.convert_current(Format::Html);
-    } else {
-        self.parent_directory();
+    PanelAreas {
+        browser: top[0],
+        preview: top[1],
+        log: main[1],
+        status: main[2],
     }
-    true
 }
 ```
 
-- [ ] **Step 4: Run tests**
-
-```bash
-cargo test browser_key_h_converts_html_in_preview_mode browser_key_h_parent_dir_in_browse_mode -- --nocapture
-```
-
-Expected: both PASS.
-
-- [ ] **Step 5: Full verification**
-
-```bash
-cargo check && cargo clippy && cargo fmt && cargo test
-```
-
-Expected: zero warnings, 208+ tests pass.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/app.rs
-git commit -m "feat: h key converts to HTML in browser+preview mode"
-```
-
----
-
-### Task 3: Mouse Support for Panel Navigation
-
-**Files:**
-- Modify: `src/app.rs:424-428`
-- Modify: `src/main.rs:48-52`
-- Test: `src/app.rs` (update existing mouse test)
-
-**Interfaces:**
-- Consumes: `App::handle_mouse(&mut self, event: MouseEvent) -> bool`
-- Produces: Click events in browser panel select the clicked entry
-
-Mouse support enables clicking on files/directories in the browser panel. The approach:
-1. Enable mouse capture in `main.rs`
-2. Parse `MouseEvent::Down` with row/col to determine which entry was clicked
-3. Select and activate the clicked entry
-
-- [ ] **Step 1: Enable mouse events in main.rs**
+- [ ] **Step 2: Add status_line method to App**
 
 ```rust
-use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
-
-fn init_terminal() -> io::Result<DefaultTerminal> {
-    enable_raw_mode()?;
-    std::io::stdout().execute(EnterAlternateScreen)?;
-    std::io::stdout().execute(ratatui::crossterm::event::EnableMouseCapture)?;
-    let terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
-    Ok(terminal)
-}
-
-fn restore_terminal(terminal: &mut DefaultTerminal) -> io::Result<()> {
-    std::io::stdout().execute(ratatui::crossterm::event::DisableMouseCapture)?;
-    disable_raw_mode()?;
-    std::io::stdout().execute(LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-```
-
-- [ ] **Step 2: Handle mouse events in event loop**
-
-```rust
-fn run(terminal: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    while app.running {
-        terminal.draw(|frame| {
-            let area = frame.area();
-            ui::render(app, frame, area);
-        })?;
-
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                app.handle_key(key);
+// src/app.rs
+/// Build a status line string for the selected entry.
+pub fn status_line(&self) -> String {
+    if self.entries.is_empty() {
+        return "No files".to_string();
+    }
+    let entry = &self.entries[self.selected_index];
+    match entry {
+        FsEntry::Directory { name, .. } => {
+            format!("📁 {name} | directory")
+        }
+        FsEntry::File { name, size, extension, .. } => {
+            let size_str = format_size(*size);
+            let ext_upper = extension.to_uppercase();
+            if extension == "pdf" {
+                // Show page count if we can compute it quickly
+                let pages = pdf_page_count(entry.path()).unwrap_or(0);
+                format!("📄 {name} | {size_str} | {ext_upper} | {pages} page(s)")
+            } else {
+                format!("📄 {name} | {size_str} | {ext_upper}")
             }
-            Event::Mouse(mouse) => {
-                app.handle_mouse(mouse);
-            }
-            _ => {}
         }
     }
-    Ok(())
 }
 ```
 
-- [ ] **Step 3: Implement handle_mouse for browser clicks**
-
-Replace the stub in `app.rs`:
+Add the helper (can be a free function or inline):
 
 ```rust
-pub fn handle_mouse(&mut self, event: MouseEvent) -> bool {
-    if self.mode != Mode::Browse && self.mode != Mode::Preview {
-        return false;
+/// Quick page count for PDF files using pdf_oxide.
+fn pdf_page_count(path: &Path) -> Option<usize> {
+    pdf_oxide::api::Pdf::open(path).ok().and_then(|mut doc| {
+        doc.page_count().ok().map(|c| c as usize)
+    })
+}
+```
+
+- [ ] **Step 3: Create status_panel.rs**
+
+```rust
+// src/ui/status_panel.rs
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::Text;
+use ratatui::widgets::Paragraph;
+
+use crate::app::App;
+
+pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
+    let text = app.status_line();
+    let paragraph = Paragraph::new(Text::from(text))
+        .style(Style::default().fg(app.theme.dim_fg));
+    frame.render_widget(paragraph, area);
+}
+```
+
+- [ ] **Step 4: Wire into ui/mod.rs**
+
+```rust
+// src/ui/mod.rs
+pub mod status_panel;
+
+pub fn render(app: &App, frame: &mut Frame, area: Rect) {
+    let areas = layout::chunk_areas(area);
+
+    browser_panel::draw(frame, areas.browser, app);
+    preview_panel::draw(frame, areas.preview, app);
+    log_panel::draw(frame, areas.log, app);
+    status_panel::draw(frame, areas.status, app);
+
+    if app.mode == crate::app::Mode::Help {
+        help_popup::draw(frame, area);
     }
-    match event.kind {
-        MouseEventKind::Down(_) => {
-            // The browser panel occupies the left 1/3 of the terminal.
-            // Column-based detection is approximate but good enough.
-            let col = event.column;
-            let row = event.row;
-            // Browser panel is left 1/3 of the screen
-            // We need the terminal width to determine boundaries.
-            // For now, use a simple heuristic: if col < 40, it's a browser click.
-            if col < 40 {
-                // Calculate which entry was clicked based on row offset
-                // Row 0 = title border, row 1 = first entry, etc.
-                let has_parent = self.current_dir.parent().is_some();
-                let click_row = row.saturating_sub(1); // skip top border
-                let total_visible = self.entries.len() + if has_parent { 1 } else { 0 };
-                if (click_row as usize) < total_visible {
-                    self.selected_index = click_row;
-                    self.activate_selection();
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-```
-
-- [ ] **Step 4: Update mouse test**
-
-```rust
-#[test]
-fn handle_mouse_returns_false_for_unknown_event() {
-    let mut app = App::new();
-    let event = MouseEvent {
-        kind: MouseEventKind::Moved,
-        column: 0,
-        row: 0,
-        modifiers: crossterm::event::KeyModifiers::NONE,
-    };
-    assert!(!app.handle_mouse(event));
-}
-```
-
-- [ ] **Step 5: Verify**
-
-```bash
-cargo check && cargo clippy && cargo fmt && cargo test
-```
-
-Expected: zero warnings, tests pass.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/app.rs src/main.rs
-git commit -m "feat: basic mouse support for browser panel clicks"
-```
-
----
-
-### Task 4: README.md
-
-**Files:**
-- Create: `README.md`
-
-**Interfaces:** None (documentation only)
-
-Write a comprehensive README covering installation, usage, keybindings, conversion matrix, and development.
-
-- [ ] **Step 1: Write README.md**
-
-```markdown
-# lazymd
-
-A terminal-based (TUI) bidirectional converter between Markdown, HTML, PDF, and Typst.
-
-Built with [ratatui](https://github.com/ratatui-org/ratatui) and pure Rust conversion crates — no system tools required.
-
-## Features
-
-- **Browse** filesystem with directory tree navigation
-- **Preview** Markdown (syntax highlighted), HTML (tag-highlighted), PDF (text-extracted), and Typst source
-- **Convert** between formats with single-key shortcuts
-- **Themes** — dark, light, dracula, solarized
-- **Configurable** — persists last directory and theme via XDG config
-
-## Installation
-
-```bash
-# Basic build
-cargo install --path .
-
-# With Typst support
-cargo install --path . --features typst
-```
-
-## Usage
-
-```bash
-lazymd
-```
-
-### Keybindings
-
-| Key | Context | Action |
-|-----|---------|--------|
-| `j`/`↓` `k`/`↑` | Browser | Navigate entries |
-| `h`/`←` `l`/`→` | Browser | Parent / enter directory |
-| `Enter` | Browser | Open file or directory |
-| `r` | Browser | Refresh directory |
-| `j`/`↓` `k`/`↑` | Preview | Scroll |
-| `PageUp`/`PageDown` | Preview/Log | Scroll 10 lines |
-| `g`/`Home` `G`/`End` | Preview/Log | Scroll to top/bottom |
-| `m` `h` `p` `t` | Any | Convert to format |
-| `Tab` | Global | Cycle focus |
-| `Esc` | Global | Back to Browse |
-| `?` | Global | Toggle help |
-| `q` | Global | Quit |
-
-### Conversion Matrix
-
-| From → To | Crate | Status |
-|-----------|-------|--------|
-| MD → HTML | `pulldown-cmark` | ✅ |
-| MD → PDF | `markdown2pdf` | ✅ |
-| HTML → MD | `html2md` | ✅ |
-| HTML → PDF | `printpdf` (html feature) | ✅ |
-| PDF → MD | `pdf_oxide` | ✅ (best-effort) |
-| PDF → HTML | `pdf_oxide` | ✅ (best-effort) |
-| Typst → PDF | `typst` + `typst-pdf` | ✅ (feature-gated) |
-| Typst → HTML | `typst` + `typst-html` | ✅ (feature-gated) |
-
-## Configuration
-
-Config file: `~/.config/lazymd/config.toml`
-
-```toml
-last_directory = "/home/user/projects"
-theme = "dracula"
-```
-
-Available themes: `dark`, `light`, `dracula`, `solarized`
-
-## Development
-
-```bash
-just build        # debug build
-just run          # run the TUI
-just test         # all tests
-just clippy       # lint
-just fmt          # format
-just precommit    # fmt + clippy + test
-```
-
-## Architecture
-
-```
-src/
-  main.rs         — entrypoint, event loop
-  app.rs          — App state, key dispatch, navigation, conversion
-  converter.rs    — crate-based conversion dispatch
-  preview.rs      — file preview (text extraction, HTML stripping)
-  fs_utils.rs     — file listing, format detection
-  config.rs       — XDG config, Settings, Theme
-  ui/
-    mod.rs        — top-level render
-    layout.rs     — panel layout calculation
-    browser_panel.rs  — directory tree browser
-    preview_panel.rs  — file preview with syntax highlighting
-    log_panel.rs      — conversion status log
-    help_popup.rs     — keybinding reference overlay
-```
-
-## License
-
-MIT
-```
-
-- [ ] **Step 2: Verify**
-
-```bash
-cargo check
-```
-
-Expected: clean (README is documentation only).
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add README.md
-git commit -m "docs: add README.md with installation, usage, and architecture"
-```
-
----
-
-### Task 5: Search/Filter in Browser Panel
-
-**Files:**
-- Modify: `src/app.rs` (add `filter_query` field, `set_filter` method)
-- Modify: `src/ui/browser_panel.rs` (show filter indicator)
-- Modify: `src/fs_utils.rs` (add `filter_entries` function)
-- Test: `src/app.rs` (add filter tests)
-
-**Interfaces:**
-- Consumes: `App` struct, `list_entries()` function
-- Produces: `App::filter_query: String`, `App::set_filter(&mut self, query: &str)`, `fs_utils::filter_entries(entries, query) -> Vec<FsEntry>`
-
-Add a `/` keybinding in browser focus that opens a filter prompt. As the user types, entries are filtered by name (case-insensitive substring match). `Esc` clears the filter.
-
-- [ ] **Step 1: Add filter field to App**
-
-```rust
-pub struct App {
-    // ... existing fields ...
-    pub filter_query: String,
-    pub all_entries: Vec<FsEntry>,  // unfiltered master list
-}
-```
-
-- [ ] **Step 2: Add filter methods**
-
-```rust
-impl App {
-    pub fn set_filter(&mut self, query: &str) {
-        self.filter_query = query.to_string();
-        if query.is_empty() {
-            self.entries = self.all_entries.clone();
-        } else {
-            self.entries = self.all_entries.iter()
-                .filter(|e| e.name().to_lowercase().contains(&query.to_lowercase()))
-                .cloned()
-                .collect();
-        }
-        self.selected_index = 0;
+    if app.mode == crate::app::Mode::Settings {
+        settings_panel::draw(frame, area, app);
     }
 }
-```
-
-- [ ] **Step 3: Add `/` keybinding in browser**
-
-In `handle_browser_key`:
-
-```rust
-KeyCode::Char('/') => {
-    // Enter filter mode — for now, toggle a simple filter
-    // (full input handling would need a text input widget)
-    true
-}
-```
-
-For v1, keep it simple: `/` toggles a predefined filter or clears it. Full text input is deferred.
-
-- [ ] **Step 4: Show filter in browser panel**
-
-In `browser_panel.rs`, show `🔍 <query>` in the title when filter is active:
-
-```rust
-let title = if app.filter_query.is_empty() {
-    format!(" Browser: {} ", app.current_dir.display())
-} else {
-    format!(" Browser: {} 🔍 {} ", app.current_dir.display(), app.filter_query)
-};
 ```
 
 - [ ] **Step 5: Write tests**
 
 ```rust
+// In src/app.rs #[cfg(test)] module
+
 #[test]
-fn set_filter_filters_entries() {
-    let mut app = app_with_entries(vec![
-        FsEntry::File { path: PathBuf::from("readme.md"), name: "readme.md".into(), extension: "md".into(), size: 0 },
-        FsEntry::File { path: PathBuf::from("index.html"), name: "index.html".into(), extension: "html".into(), size: 0 },
-        FsEntry::File { path: PathBuf::from("doc.typ"), name: "doc.typ".into(), extension: "typ".into(), size: 0 },
-    ]);
-    app.set_filter("read");
-    assert_eq!(app.entries.len(), 1);
-    assert_eq!(app.entries[0].name(), "readme.md");
+fn status_line_empty_entries() {
+    let app = app_with_entries(vec![]);
+    assert_eq!(app.status_line(), "No files");
 }
 
 #[test]
-fn set_filter_empty_restores_all() {
-    let mut app = app_with_entries(vec![
-        FsEntry::File { path: PathBuf::from("a.md"), name: "a.md".into(), extension: "md".into(), size: 0 },
-        FsEntry::File { path: PathBuf::from("b.md"), name: "b.md".into(), extension: "md".into(), size: 0 },
+fn status_line_shows_file_info() {
+    let app = app_with_entries(vec![
+        FsEntry::File {
+            path: PathBuf::from("readme.md"),
+            name: "readme.md".into(),
+            extension: "md".into(),
+            size: 1024,
+        },
     ]);
-    app.set_filter("a");
-    assert_eq!(app.entries.len(), 1);
-    app.set_filter("");
-    assert_eq!(app.entries.len(), 2);
+    let line = app.status_line();
+    assert!(line.contains("readme.md"));
+    assert!(line.contains("1.0 KB"));
+    assert!(line.contains("MD"));
+}
+
+#[test]
+fn status_line_shows_directory() {
+    let app = app_with_entries(vec![
+        FsEntry::Directory {
+            path: PathBuf::from("src"),
+            name: "src".into(),
+        },
+    ]);
+    let line = app.status_line();
+    assert!(line.contains("src"));
+    assert!(line.contains("directory"));
 }
 ```
 
@@ -586,31 +195,314 @@ fn set_filter_empty_restores_all() {
 cargo check && cargo clippy && cargo fmt && cargo test
 ```
 
-Expected: zero warnings, tests pass.
+Expected: zero warnings, 240+ tests pass.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/app.rs src/ui/browser_panel.rs
-git commit -m "feat: add search/filter for browser entries"
+git add src/ui/status_panel.rs src/ui/layout.rs src/ui/mod.rs src/app.rs
+git commit -m "feat: add status bar with file info (name, size, type, PDF pages)"
 ```
 
 ---
 
-### Task 6: File Operations (Rename, Delete)
+### Task 2: Text Input Popup (Rename + Create File/Dir) (P1)
 
 **Files:**
-- Modify: `src/app.rs` (add `rename_file`, `delete_file` methods, keybindings)
-- Modify: `src/ui/browser_panel.rs` (show operation status)
-- Test: `src/app.rs` (add operation tests)
+- Modify: `src/app.rs:13-53, 361-422, 468-497, 696-759`
 
 **Interfaces:**
-- Consumes: `App` struct, `FsEntry` enum
-- Produces: `App::rename_file(&mut self, new_name: &str)`, `App::delete_selected(&mut self)`
+- Consumes: `App` struct, `Mode` enum, `handle_key` dispatch
+- Produces: `Mode::Input(InputMode)` variant, `input_buffer: String`, handle_input_key logic
 
-Add `d` to delete the selected file (with confirmation) and `R` to rename it. These only work on files, not directories (for safety).
+Add a generic text input mode shared by rename (`R`), create file (`n`), and create dir (`N`). The input prompt appears in the browser panel title bar. Esc cancels, Enter confirms.
 
-- [ ] **Step 1: Add delete method**
+- [ ] **Step 1: Add InputMode enum and fields to App**
+
+```rust
+/// What kind of text input the user is performing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputMode {
+    Rename,
+    NewFile,
+    NewDir,
+}
+
+// Add to App struct:
+// pub input_mode: Option<InputMode>,
+// pub input_buffer: String,
+```
+
+Change `mode: Mode` to accept `Mode::Input(InputMode)`:
+
+```rust
+pub enum Mode {
+    Browse,
+    Preview,
+    Help,
+    Settings,
+    Input(InputMode),
+}
+```
+
+Add to `App`:
+```rust
+pub input_buffer: String,
+```
+
+Update `App::new()`: `input_buffer: String::new()`.
+
+- [ ] **Step 2: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    input_buffer: String::new(),
+    // ...
+}
+```
+
+Same for `app_in_temp_dir`.
+
+- [ ] **Step 3: Add input mode handling in handle_key**
+
+Before the main `match key.code`, add:
+
+```rust
+if let Mode::Input(input_mode) = &self.mode {
+    return match key.code {
+        KeyCode::Esc => {
+            self.mode = Mode::Browse;
+            self.input_buffer.clear();
+            self.add_log("Cancelled".to_string());
+            true
+        }
+        KeyCode::Enter => {
+            let name = std::mem::take(&mut self.input_buffer);
+            let result = match input_mode {
+                InputMode::Rename => {
+                    self.rename_selected(&name);
+                    true
+                }
+                InputMode::NewFile => {
+                    let path = self.current_dir.join(&name);
+                    match std::fs::write(&path, "") {
+                        Ok(()) => {
+                            self.add_log(format!("📄 Created: {name}"));
+                            self.navigate_to(&self.current_dir.clone());
+                        }
+                        Err(e) => self.add_log(format!("✗ Create failed: {e}")),
+                    }
+                    true
+                }
+                InputMode::NewDir => {
+                    let path = self.current_dir.join(&name);
+                    match std::fs::create_dir(&path) {
+                        Ok(()) => {
+                            self.add_log(format!("📁 Created: {name}"));
+                            self.navigate_to(&self.current_dir.clone());
+                        }
+                        Err(e) => self.add_log(format!("✗ Create failed: {e}")),
+                    }
+                    true
+                }
+            };
+            self.mode = Mode::Browse;
+            result
+        }
+        KeyCode::Char(c) => {
+            self.input_buffer.push(c);
+            true
+        }
+        KeyCode::Backspace => {
+            self.input_buffer.pop();
+            true
+        }
+        _ => true,
+    };
+}
+```
+
+- [ ] **Step 4: Add keybindings in handle_browser_key**
+
+Replace the `R` rename handler:
+
+```rust
+KeyCode::Char('R') => {
+    let name = match self.entries.get(self.selected_index) {
+        Some(e) => e.name().to_string(),
+        None => {
+            self.add_log("No entry selected".to_string());
+            return true;
+        }
+    };
+    self.mode = Mode::Input(InputMode::Rename);
+    self.input_buffer = name;
+    self.add_log("Rename: edit name, Enter to confirm, Esc to cancel".to_string());
+    true
+}
+
+// Add new keybindings:
+KeyCode::Char('n') => {
+    self.mode = Mode::Input(InputMode::NewFile);
+    self.input_buffer = "untitled.md".to_string();
+    self.add_log("New file: type name, Enter to confirm, Esc to cancel".to_string());
+    true
+}
+KeyCode::Char('N') => {
+    self.mode = Mode::Input(InputMode::NewDir);
+    self.input_buffer = "newdir".to_string();
+    self.add_log("New directory: type name, Enter to confirm, Esc to cancel".to_string());
+    true
+}
+```
+
+- [ ] **Step 5: Show input mode in browser panel title**
+
+In `src/ui/browser_panel.rs`, modify the title block:
+
+```rust
+let title = match &app.mode {
+    crate::app::Mode::Input(mode) => {
+        let prompt = match mode {
+            crate::app::InputMode::Rename => "Rename",
+            crate::app::InputMode::NewFile => "New File",
+            crate::app::InputMode::NewDir => "New Dir",
+        };
+        format!(" {prompt}: {} ", app.input_buffer)
+    }
+    _ => {
+        if app.filtering {
+            format!(" Browser: {}/{} ", app.current_dir.display(), app.filter_query)
+        } else if !app.filter_query.is_empty() {
+            format!(" Browser: {} 🔍 {} ", app.current_dir.display(), app.filter_query)
+        } else {
+            format!(" Browser: {} ", app.current_dir.display())
+        }
+    }
+};
+```
+
+- [ ] **Step 6: Write tests**
+
+```rust
+#[test]
+fn input_rename_enter_confirms() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.mode = Mode::Input(InputMode::Rename);
+    app.input_buffer = "newname.md".to_string();
+    let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert_eq!(app.mode, Mode::Browse);
+    assert!(dir.path().join("newname.md").exists());
+    assert!(!dir.path().join("readme.md").exists());
+}
+
+#[test]
+fn input_esc_cancels() {
+    let mut app = app_with_entries(vec![]);
+    app.mode = Mode::Input(InputMode::Rename);
+    app.input_buffer = "whatever".to_string();
+    let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert_eq!(app.mode, Mode::Browse);
+    assert!(app.input_buffer.is_empty());
+}
+
+#[test]
+fn input_char_appends_to_buffer() {
+    let mut app = app_with_entries(vec![]);
+    app.mode = Mode::Input(InputMode::Rename);
+    let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert_eq!(app.input_buffer, "x");
+}
+
+#[test]
+fn input_backspace_removes_char() {
+    let mut app = app_with_entries(vec![]);
+    app.mode = Mode::Input(InputMode::Rename);
+    app.input_buffer = "abc".to_string();
+    let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert_eq!(app.input_buffer, "ab");
+}
+
+#[test]
+fn input_new_file_creates_file() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.mode = Mode::Input(InputMode::NewFile);
+    app.input_buffer = "newfile.txt".to_string();
+    let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert!(dir.path().join("newfile.txt").exists());
+}
+
+#[test]
+fn input_new_dir_creates_directory() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.mode = Mode::Input(InputMode::NewDir);
+    app.input_buffer = "newfolder".to_string();
+    let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.handle_key(key));
+    assert!(dir.path().join("newfolder").is_dir());
+}
+```
+
+- [ ] **Step 7: Update test for Mode enum equality**
+
+All existing tests that use `Mode::Browse` / `Mode::Preview` etc. still work because `Mode::Input(InputMode::Rename) != Mode::Browse`. The `Mode` enum derives `PartialEq` so this is fine.
+
+- [ ] **Step 8: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 247+ tests pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/app.rs src/ui/browser_panel.rs
+git commit -m "feat: text input popup for rename, create file, and create directory"
+```
+
+---
+
+### Task 3: Trash Instead of Hard Delete (P1)
+
+**Files:**
+- Modify: `src/app.rs:230-250, 696-759`
+
+**Interfaces:**
+- Consumes: `App::delete_selected`, `dirs::data_dir()`, `App::trash_dir: PathBuf`
+- Produces: Moved-to-trash behavior instead of permanent deletion
+
+Replace `remove_file` with a move-to-trash operation. The trash directory lives at `$XDG_DATA_HOME/lazymd/trash` (or `~/.local/share/lazymd/trash`). Add a `trash_dir` field to App so tests can override it.
+
+- [ ] **Step 1: Add trash_dir to App struct**
+
+```rust
+// In App struct:
+pub trash_dir: PathBuf;
+```
+
+- [ ] **Step 2: Initialize in App::new()**
+
+```rust
+let trash_dir = dirs::data_dir()
+    .unwrap_or_else(|| PathBuf::from("."))
+    .join("lazymd/trash");
+
+// In Self:
+trash_dir,
+```
+
+- [ ] **Step 3: Update delete_selected**
 
 ```rust
 pub fn delete_selected(&mut self) {
@@ -620,13 +512,30 @@ pub fn delete_selected(&mut self) {
     let entry = &self.entries[self.selected_index];
     match entry {
         FsEntry::File { path, name, .. } => {
-            match std::fs::remove_file(path) {
+            let _ = std::fs::create_dir_all(&self.trash_dir);
+            // Generate a unique name in trash to avoid overwrites
+            let trash_name = if self.trash_dir.join(name).exists() {
+                let stem = path.file_stem().unwrap_or_default().to_str().unwrap_or("file");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let mut counter = 1;
+                loop {
+                    let candidate = format!("{stem}-{counter}.{ext}");
+                    if !self.trash_dir.join(&candidate).exists() {
+                        break candidate;
+                    }
+                    counter += 1;
+                }
+            } else {
+                name.clone()
+            };
+            let trash_path = self.trash_dir.join(&trash_name);
+            match std::fs::rename(path, &trash_path) {
                 Ok(()) => {
-                    self.add_log(format!("🗑️ Deleted: {name}"));
+                    self.add_log(format!("🗑️ Moved to trash: {name}"));
                     self.navigate_to(&self.current_dir.clone());
                 }
                 Err(e) => {
-                    self.add_log(format!("✗ Delete failed: {e}"));
+                    self.add_log(format!("✗ Trash failed: {e}"));
                 }
             }
         }
@@ -637,57 +546,53 @@ pub fn delete_selected(&mut self) {
 }
 ```
 
-- [ ] **Step 2: Add rename method**
+- [ ] **Step 4: Update test helpers**
 
 ```rust
-pub fn rename_selected(&mut self, new_name: &str) {
-    if self.entries.is_empty() {
-        return;
-    }
-    let entry = &self.entries[self.selected_index];
-    let new_path = self.current_dir.join(new_name);
-    match std::fs::rename(entry.path(), &new_path) {
-        Ok(()) => {
-            self.add_log(format!("✏️ Renamed: {} → {new_name}", entry.name()));
-            self.navigate_to(&self.current_dir.clone());
-        }
-        Err(e) => {
-            self.add_log(format!("✗ Rename failed: {e}"));
-        }
-    }
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    trash_dir: PathBuf::from("/tmp/lazymd-trash-test"),
+    // ...
+}
+
+fn app_in_temp_dir(dir: &TempDir) -> App {
+    // ...
+    trash_dir: PathBuf::from("/tmp/lazymd-trash-test"),
+    // ...
 }
 ```
 
-- [ ] **Step 3: Add keybindings**
-
-In `handle_browser_key`:
-
-```rust
-KeyCode::Char('d') => {
-    self.delete_selected();
-    true
-}
-KeyCode::Char('R') => {
-    // For v1, rename to a fixed pattern (full input deferred)
-    self.rename_selected(&format!("{}-renamed", self.entries[self.selected_index].name()));
-    true
-}
-```
-
-- [ ] **Step 4: Write tests**
+- [ ] **Step 5: Write tests**
 
 ```rust
 #[test]
-fn delete_selected_removes_file() {
-    let dir = TempDir::new().unwrap();
-    let file_path = dir.path().join("test.md");
-    fs::write(&file_path, "content").unwrap();
+fn delete_selected_moves_to_trash() {
+    let dir = create_test_dir();
     let mut app = app_in_temp_dir(&dir);
-    let idx = app.entries.iter().position(|e| e.name() == "test.md").unwrap();
+    app.trash_dir = dir.path().join("trash");
+    let idx = app.entries.iter().position(|e| e.name() == "readme.md").unwrap();
     app.selected_index = idx;
     app.delete_selected();
-    assert!(!file_path.exists(), "file should be deleted");
-    assert!(app.log_messages.iter().any(|m| m.contains("Deleted")));
+    assert!(!dir.path().join("readme.md").exists(), "file should be removed from source");
+    assert!(dir.path().join("trash").join("readme.md").exists(), "file should be in trash");
+    assert!(app.log_messages.iter().any(|m| m.contains("trash")));
+}
+
+#[test]
+fn delete_selected_trash_handles_name_collision() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.trash_dir = dir.path().join("trash");
+    std::fs::create_dir_all(app.trash_dir.join("trash")).unwrap();
+    // Pre-place a file in trash with the same name
+    std::fs::write(dir.path().join("trash").join("readme.md"), "old").unwrap();
+    let idx = app.entries.iter().position(|e| e.name() == "readme.md").unwrap();
+    app.selected_index = idx;
+    app.delete_selected();
+    // Should have created readme-1.md or similar
+    let trash_dir = dir.path().join("trash");
+    let entries: Vec<_> = std::fs::read_dir(&trash_dir).unwrap().map(|e| e.unwrap().file_name().to_str().unwrap().to_string()).collect();
+    assert!(entries.iter().any(|n| n.starts_with("readme")), "trash file should exist with suffix");
 }
 
 #[test]
@@ -697,106 +602,800 @@ fn delete_selected_empty_entries_no_panic() {
 }
 ```
 
+- [ ] **Step 6: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 250+ tests pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/app.rs
+git commit -m "feat: move deleted files to trash instead of permanent deletion"
+```
+
+---
+
+### Task 4: Sort by Size/Date (P2)
+
+**Files:**
+- Modify: `src/app.rs:36-89, 425-497, 696-759`
+
+**Interfaces:**
+- Consumes: `App` struct, `FsEntry`, `list_entries`
+- Produces: `SortBy` enum, `App::sort: SortBy`, `App::reapply_sort()`, `o` keybinding
+
+Add a `SortBy` enum and `o` key to cycle sort order: name → size → modified. Dirs are always first within each mode.
+
+- [ ] **Step 1: Add SortBy enum**
+
+```rust
+/// How to sort entries in the browser panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortBy {
+    Name,
+    Size,
+    Modified,
+}
+```
+
+- [ ] **Step 2: Add sort field to App**
+
+```rust
+// In App struct:
+pub sort: SortBy;
+```
+
+In `App::new()`: `sort: SortBy::Name,`
+
+- [ ] **Step 3: Add reapply_sort method**
+
+```rust
+pub fn reapply_sort(&mut self) {
+    let sort = self.sort;
+    let source = if self.filter_query.is_empty() {
+        &self.all_entries
+    } else {
+        &self.entries
+    };
+    let mut entries = source.clone();
+
+    // Helper to get size for sorting (0 for directories)
+    let entry_size = |e: &FsEntry| match e {
+        FsEntry::File { size, .. } => *size,
+        _ => 0,
+    };
+
+    // Helper to get modified time via metadata
+    let entry_modified = |e: &FsEntry| -> u64 {
+        std::fs::metadata(e.path())
+            .and_then(|m| m.modified())
+            .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+            .unwrap_or(0)
+    };
+
+    entries.sort_by(|a, b| {
+        let a_is_dir = matches!(a, FsEntry::Directory { .. });
+        let b_is_dir = matches!(b, FsEntry::Directory { .. });
+        // Dirs first
+        b_is_dir.cmp(&a_is_dir).then_with(|| match sort {
+            SortBy::Name => a.name().to_lowercase().cmp(&b.name().to_lowercase()),
+            SortBy::Size => entry_size(b).cmp(&entry_size(a)), // larger first
+            SortBy::Modified => entry_modified(b).cmp(&entry_modified(a)), // newer first
+        })
+    });
+    self.entries = entries;
+}
+```
+
+- [ ] **Step 4: Add o keybinding in handle_browser_key**
+
+```rust
+KeyCode::Char('o') => {
+    self.sort = match self.sort {
+        SortBy::Name => SortBy::Size,
+        SortBy::Size => SortBy::Modified,
+        SortBy::Modified => SortBy::Name,
+    };
+    self.reapply_sort();
+    self.selected_index = 0;
+    self.add_log(format!("Sort: {:?}", self.sort));
+    true
+}
+```
+
+- [ ] **Step 5: Call reapply_sort after navigate_to and set_filter**
+
+In `navigate_to` after setting entries: `self.reapply_sort();`
+In `set_filter` after setting entries: `self.reapply_sort();`
+
+- [ ] **Step 6: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    sort: SortBy::Name,
+    // ...
+}
+```
+
+Same for `app_in_temp_dir`.
+
+- [ ] **Step 7: Write tests**
+
+```rust
+#[test]
+fn sort_default_is_name() {
+    let app = App::new();
+    assert_eq!(app.sort, SortBy::Name);
+}
+
+#[test]
+fn browser_key_o_cycles_sort() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let key = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.sort, SortBy::Size);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.sort, SortBy::Modified);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.sort, SortBy::Name);
+}
+
+#[test]
+fn reapply_sort_by_size_orders_largest_first() {
+    let entries = vec![
+        FsEntry::File { path: PathBuf::from("small.md"), name: "small.md".into(), extension: "md".into(), size: 10 },
+        FsEntry::File { path: PathBuf::from("large.md"), name: "large.md".into(), extension: "md".into(), size: 1000 },
+        FsEntry::File { path: PathBuf::from("medium.md"), name: "medium.md".into(), extension: "md".into(), size: 100 },
+    ];
+    let mut app = app_with_entries(entries);
+    app.sort = SortBy::Size;
+    app.reapply_sort();
+    assert_eq!(app.entries[0].name(), "large.md");
+    assert_eq!(app.entries[1].name(), "medium.md");
+    assert_eq!(app.entries[2].name(), "small.md");
+}
+
+#[test]
+fn reapply_sort_preserves_dirs_first() {
+    let entries = vec![
+        FsEntry::File { path: PathBuf::from("a.md"), name: "a.md".into(), extension: "md".into(), size: 100 },
+        FsEntry::Directory { path: PathBuf::from("zdir"), name: "zdir".into() },
+    ];
+    let mut app = app_with_entries(entries);
+    app.sort = SortBy::Size;
+    app.reapply_sort();
+    assert!(matches!(app.entries[0], FsEntry::Directory { .. }));
+    assert!(matches!(app.entries[1], FsEntry::File { .. }));
+}
+```
+
+- [ ] **Step 8: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 256+ tests pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/app.rs
+git commit -m "feat: add sort by size/date with 'o' key cycling"
+```
+
+---
+
+### Task 5: Full-Screen Preview Toggle (P2)
+
+**Files:**
+- Modify: `src/ui/layout.rs:11-27`, `src/ui/mod.rs:14-23`, `src/app.rs:36-53, 537-582, 696-759`
+
+**Interfaces:**
+- Consumes: `App::zoom: bool`, `chunk_areas(Rect) -> PanelAreas`
+- Produces: `x` key toggles zoom in preview focus, full-area preview when zoomed
+
+- [ ] **Step 1: Add zoom field to App**
+
+```rust
+// In App struct:
+pub zoom: bool;
+```
+
+In `App::new()`: `zoom: false,`
+
+- [ ] **Step 2: Add x keybinding in handle_preview_key**
+
+```rust
+KeyCode::Char('x') => {
+    self.zoom = !self.zoom;
+    self.add_log(if self.zoom {
+        "Zoom: full preview".to_string()
+    } else {
+        "Zoom: normal".to_string()
+    });
+    true
+}
+```
+
+- [ ] **Step 3: Update chunk_areas to accept zoom**
+
+```rust
+pub fn chunk_areas(area: Rect, zoom: bool) -> PanelAreas {
+    if zoom {
+        return PanelAreas {
+            browser: Rect::default(),
+            preview: area,
+            log: Rect::default(),
+            status: Rect::default(),
+        };
+    }
+    // ... existing logic
+}
+```
+
+- [ ] **Step 4: Update render and handle_mouse callers**
+
+In `src/ui/mod.rs`:
+```rust
+let areas = layout::chunk_areas(area, app.zoom);
+```
+
+In `src/app.rs` `handle_mouse`:
+```rust
+let areas = crate::ui::layout::chunk_areas(area, self.zoom);
+```
+
+- [ ] **Step 5: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    zoom: false,
+    // ...
+}
+```
+
+Same for `app_in_temp_dir`.
+
+- [ ] **Step 6: Write tests**
+
+```rust
+#[test]
+fn preview_key_x_toggles_zoom() {
+    let mut app = app_with_entries(vec![]);
+    assert!(!app.zoom);
+    let key = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(app.handle_preview_key(key));
+    assert!(app.zoom);
+    assert!(app.handle_preview_key(key));
+    assert!(!app.zoom);
+}
+
+#[test]
+fn chunk_areas_zoom_gives_full_area() {
+    let area = Rect::new(0, 0, 100, 50);
+    let areas = layout::chunk_areas(area, true);
+    assert_eq!(areas.preview, area);
+    assert_eq!(areas.browser, Rect::default());
+    assert_eq!(areas.log, Rect::default());
+    assert_eq!(areas.status, Rect::default());
+}
+
+#[test]
+fn chunk_areas_normal_gives_three_panels() {
+    let area = Rect::new(0, 0, 120, 60);
+    let areas = layout::chunk_areas(area, false);
+    assert!(areas.browser.width > 0);
+    assert!(areas.preview.width > 0);
+    assert!(areas.log.height == 6);
+    assert!(areas.status.height == 1);
+}
+```
+
+- [ ] **Step 7: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 260+ tests pass.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/app.rs src/ui/layout.rs src/ui/mod.rs
+git commit -m "feat: toggle full-screen preview with 'x' key"
+```
+
+---
+
+### Task 6: Directory History (H/L Back/Forward) (P2)
+
+**Files:**
+- Modify: `src/app.rs:36-89, 92-112, 160-167, 425-497, 696-759`
+
+**Interfaces:**
+- Consumes: `App::navigate_to`, `App::current_dir`
+- Produces: `history: Vec<PathBuf>`, `history_pos: usize`, `H`/`L` keys, `load_dir` helper
+
+- [ ] **Step 1: Add history fields to App**
+
+```rust
+// In App struct:
+pub history: Vec<PathBuf>,
+pub history_pos: usize,
+```
+
+- [ ] **Step 2: Initialize in App::new()**
+
+```rust
+let initial_dir = current_dir.clone();
+// ...
+history: vec![initial_dir],
+history_pos: 0,
+```
+
+- [ ] **Step 3: Extract load_dir helper**
+
+Create a private method that sets state without pushing to history:
+
+```rust
+/// Load a directory into the browser without touching history.
+fn load_dir(&mut self, path: &Path) {
+    if let Ok(entries) = list_entries(path) {
+        self.current_dir = path.to_path_buf();
+        self.all_entries = entries;
+        self.entries = self.all_entries.clone();
+        self.filter_query.clear();
+        self.selected_index = 0;
+        self.preview_content.clear();
+        self.preview_path = None;
+        self.preview_scroll = 0;
+        self.zoom = false;
+        self.add_log(format!("📂 {}", self.current_dir.display()));
+        // Persist directory
+        let _ = save_settings(&Settings {
+            last_directory: Some(self.current_dir.clone()),
+            theme: None,
+        });
+    } else {
+        self.add_log(format!("Cannot open directory: {}", path.display()));
+    }
+}
+```
+
+- [ ] **Step 4: Modify navigate_to to use load_dir with history push**
+
+```rust
+pub fn navigate_to(&mut self, path: &Path) {
+    // Truncate any forward history
+    self.history.truncate(self.history_pos + 1);
+    self.load_dir(path);
+    self.history.push(self.current_dir.clone());
+    self.history_pos = self.history.len() - 1;
+}
+```
+
+- [ ] **Step 5: Add H/L keybindings in handle_browser_key**
+
+```rust
+KeyCode::Char('H') => {
+    if self.history_pos > 0 {
+        self.history_pos -= 1;
+        self.load_dir(&self.history[self.history_pos]);
+        self.add_log(format!("History: ← {}", self.current_dir.display()));
+    } else {
+        self.add_log("At start of history".to_string());
+    }
+    true
+}
+KeyCode::Char('L') => {
+    if self.history_pos + 1 < self.history.len() {
+        self.history_pos += 1;
+        self.load_dir(&self.history[self.history_pos]);
+        self.add_log(format!("History: → {}", self.current_dir.display()));
+    } else {
+        self.add_log("At end of history".to_string());
+    }
+    true
+}
+```
+
+- [ ] **Step 6: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    history: vec![PathBuf::from("/test")],
+    history_pos: 0,
+    // ...
+}
+
+fn app_in_temp_dir(dir: &TempDir) -> App {
+    let path = dir.path().to_path_buf();
+    // ...
+    history: vec![path.clone()],
+    history_pos: 0,
+    // ...
+}
+```
+
+- [ ] **Step 7: Write tests**
+
+```rust
+#[test]
+fn history_navigate_pushes() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let subdir = dir.path().join("subdir");
+    app.navigate_to(&subdir);
+    assert_eq!(app.history_pos, 1);
+    assert_eq!(app.history.len(), 2);
+    assert_eq!(app.history[0], dir.path());
+    assert_eq!(app.history[1], subdir);
+}
+
+#[test]
+fn history_back_returns() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let subdir = dir.path().join("subdir");
+    app.navigate_to(&subdir);
+    let key = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.history_pos, 0);
+    assert_eq!(app.current_dir, dir.path());
+}
+
+#[test]
+fn history_forward_returns() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let subdir = dir.path().join("subdir");
+    app.navigate_to(&subdir);
+    app.history_pos = 0; // go back
+    let key = KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.history_pos, 1);
+    assert_eq!(app.current_dir, subdir);
+}
+
+#[test]
+fn history_new_navigation_truncates_forward() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.navigate_to(&dir.path().join("subdir"));
+    app.navigate_to(&dir.path().join("another"));
+    app.history_pos = 0; // go back to root
+    app.navigate_to(&dir.path().join("subdir")); // new path from root
+    // Forward history should be truncated
+    assert_eq!(app.history_pos, 1);
+    assert_eq!(app.history.len(), 2);
+}
+
+#[test]
+fn history_back_noop_at_start() {
+    let mut app = app_with_entries(vec![]);
+    let key = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.history_pos, 0);
+}
+```
+
+- [ ] **Step 8: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 268+ tests pass.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/app.rs
+git commit -m "feat: directory history with H/L back/forward navigation"
+```
+
+---
+
+### Task 7: Copy/Paste Files (P2)
+
+**Files:**
+- Modify: `src/app.rs:36-89, 425-497, 696-759`
+
+**Interfaces:**
+- Consumes: `App` struct, `FsEntry`, `std::fs::copy`
+- Produces: `App::clipboard: Option<FsEntry>`, `c` copy, `v` paste keybindings
+
+- [ ] **Step 1: Add clipboard field to App**
+
+```rust
+// In App struct:
+pub clipboard: Option<FsEntry>;
+```
+
+In `App::new()`: `clipboard: None,`
+
+- [ ] **Step 2: Add copy/paste keybindings in handle_browser_key**
+
+```rust
+KeyCode::Char('c') => {
+    if self.entries.is_empty() {
+        self.add_log("No entry selected to copy".to_string());
+        return true;
+    }
+    let entry = &self.entries[self.selected_index];
+    match entry {
+        FsEntry::File { name, .. } => {
+            self.clipboard = Some(entry.clone());
+            self.add_log(format!("📋 Copied: {name}"));
+        }
+        FsEntry::Directory { .. } => {
+            self.add_log("Cannot copy directories yet".to_string());
+        }
+    }
+    true
+}
+KeyCode::Char('v') => {
+    match &self.clipboard {
+        Some(FsEntry::File { path, name, .. }) => {
+            let dest = self.current_dir.join(name);
+            if dest.exists() {
+                // Append suffix
+                let stem = path.file_stem().unwrap_or_default().to_str().unwrap_or("file");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let mut counter = 1;
+                let mut new_dest;
+                loop {
+                    let new_name = format!("{stem}-{counter}.{ext}");
+                    new_dest = self.current_dir.join(&new_name);
+                    if !new_dest.exists() {
+                        break;
+                    }
+                    counter += 1;
+                }
+                match std::fs::copy(path, &new_dest) {
+                    Ok(_) => self.add_log(format!("📋 Pasted: {} (as {})", name, new_dest.file_name().unwrap().to_str().unwrap())),
+                    Err(e) => self.add_log(format!("✗ Paste failed: {e}")),
+                }
+            } else {
+                match std::fs::copy(path, &dest) {
+                    Ok(_) => self.add_log(format!("📋 Pasted: {name}")),
+                    Err(e) => self.add_log(format!("✗ Paste failed: {e}")),
+                }
+            }
+            self.navigate_to(&self.current_dir.clone());
+        }
+        Some(FsEntry::Directory { .. }) => {
+            self.add_log("Cannot paste directories yet".to_string());
+        }
+        None => {
+            self.add_log("Nothing to paste".to_string());
+        }
+    }
+    true
+}
+```
+
+- [ ] **Step 3: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    clipboard: None,
+    // ...
+}
+```
+
+Same for `app_in_temp_dir`.
+
+- [ ] **Step 4: Write tests**
+
+```rust
+#[test]
+fn copy_sets_clipboard() {
+    let entries = vec![
+        FsEntry::File { path: PathBuf::from("test.md"), name: "test.md".into(), extension: "md".into(), size: 100 },
+    ];
+    let mut app = app_with_entries(entries);
+    let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert!(app.clipboard.is_some());
+    assert_eq!(app.clipboard.unwrap().name(), "test.md");
+}
+
+#[test]
+fn paste_copies_file_into_current_dir() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    // Set clipboard to a known file
+    let src = dir.path().join("readme.md");
+    app.clipboard = Some(FsEntry::File {
+        path: src.clone(),
+        name: "readme.md".into(),
+        extension: "md".into(),
+        size: 0,
+    });
+    // Copy to a subdir
+    let subdir = dir.path().join("subdir");
+    app.navigate_to(&subdir);
+    let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert!(subdir.join("readme.md").exists());
+}
+
+#[test]
+fn paste_without_clipboard_logs_message() {
+    let mut app = app_with_entries(vec![]);
+    let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert!(app.log_messages.iter().any(|m| m.contains("Nothing to paste")));
+}
+```
+
 - [ ] **Step 5: Verify**
 
 ```bash
 cargo check && cargo clippy && cargo fmt && cargo test
 ```
 
-Expected: zero warnings, tests pass.
+Expected: zero warnings, 272+ tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add src/app.rs
-git commit -m "feat: add file delete and rename operations"
+git commit -m "feat: copy/paste files with 'c' and 'v' keys"
 ```
 
 ---
 
-### Task 7: Settings UI Panel
+### Task 8: Typst Syntax Highlighting in Preview (P2)
 
 **Files:**
-- Create: `src/ui/settings_panel.rs`
-- Modify: `src/ui/mod.rs` (add settings panel)
-- Modify: `src/app.rs` (add Settings mode, keybinding)
-- Modify: `src/ui/layout.rs` (optional, settings layout)
-- Test: `src/app.rs` (add mode tests)
+- Modify: `Cargo.toml`, `src/ui/preview_panel.rs:49-68`
+- Add: Typst syntax highlighting function in preview_panel.rs
 
 **Interfaces:**
-- Consumes: `App` struct, `Settings`, `Theme`, `theme_from_string`
-- Produces: `Mode::Settings`, settings panel draw function
+- Consumes: `typst_syntax::parse`, `typst_syntax::highlight::highlight`, `typst_syntax::LinkedNode`
+- Produces: `render_typst(source: &str) -> Vec<Line<'static>>`
 
-Add a settings panel accessible via `s` key that lets users:
-1. View current theme
-2. Cycle through available themes
-3. See current config path
+- [ ] **Step 1: Add typst-syntax dependency**
 
-- [ ] **Step 1: Add Settings mode**
-
-```rust
-pub enum Mode {
-    Browse,
-    Preview,
-    Help,
-    Settings,
-}
+```toml
+# Cargo.toml
+typst-syntax = "0.15"  # Syntax parsing and highlighting for Typst
 ```
 
-- [ ] **Step 2: Add keybinding**
-
-In `handle_key`:
+- [ ] **Step 2: Add render_typst function in preview_panel.rs**
 
 ```rust
-KeyCode::Char('s') => {
-    self.mode = Mode::Settings;
-    true
-}
-```
+/// Render Typst source code with syntax highlighting.
+fn render_typst(source: &str) -> Vec<Line<'static>> {
+    use typst_syntax::LinkedNode;
+    use typst_syntax::highlight::{highlight, Tag};
 
-- [ ] **Step 3: Create settings panel**
+    let root = typst_syntax::parse(source);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_line: Vec<Span<'static>> = Vec::new();
 
-```rust
-// src/ui/settings_panel.rs
-use ratatui::Frame;
-use ratatui::layout::Rect;
-use ratatui::style::{Style, Stylize};
-use ratatui::text::Text;
-use ratatui::widgets::{Block, Borders, Paragraph};
+    walk_typst_node(&mut current_line, &mut lines, &LinkedNode::new(&root));
 
-use crate::app::App;
-
-pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .title(" Settings ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(app.theme.focus_border));
-
-    let text = format!(
-        "Theme: {}\n\n\
-         Available themes: dark, light, dracula, solarized\n\n\
-         Config: ~/.config/lazymd/config.toml\n\n\
-         Press 's' to cycle theme\n\
-         Press Esc to close",
-        // We'd need to store the current theme name in App
-        "dark"
-    );
-
-    let paragraph = Paragraph::new(Text::from(text)).block(block);
-    frame.render_widget(paragraph, area);
-}
-```
-
-- [ ] **Step 4: Wire into ui/mod.rs**
-
-```rust
-pub mod settings_panel;
-
-pub fn render(app: &App, frame: &mut Frame, area: Rect) {
-    // ... existing panels ...
-    if app.mode == crate::app::Mode::Settings {
-        settings_panel::draw(frame, area, app);
+    if !current_line.is_empty() {
+        lines.push(Line::from(std::mem::take(&mut current_line)));
     }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::raw(source)));
+    }
+    lines
+}
+
+/// Recursively walk a Typst syntax tree, emitting styled spans.
+fn walk_typst_node(
+    spans: &mut Vec<Span<'static>>,
+    lines: &mut Vec<Line<'static>>,
+    node: &LinkedNode,
+) {
+    let tag = highlight(node);
+    let style = typst_tag_to_style(tag);
+    let text = node.leaf_text();
+
+    if !text.is_empty() {
+        let mut parts = text.split('\n').peekable();
+        while let Some(part) = parts.next() {
+            if !part.is_empty() {
+                spans.push(Span::styled(part.to_string(), style));
+            }
+            if parts.peek().is_some() {
+                lines.push(Line::from(std::mem::take(spans)));
+            }
+        }
+    } else {
+        for child in node.children() {
+            walk_typst_node(spans, lines, &child);
+        }
+    }
+}
+
+/// Map a Typst highlight tag to a ratatui style.
+fn typst_tag_to_style(tag: Option<Tag>) -> Style {
+    use ratatui::style::{Color, Modifier, Style};
+    match tag {
+        Some(Tag::Heading) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Some(Tag::Strong) => Style::default().add_modifier(Modifier::BOLD),
+        Some(Tag::Emph) => Style::default().add_modifier(Modifier::ITALIC),
+        Some(Tag::Link) => Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+        Some(Tag::Raw) => Style::default().fg(Color::Green),
+        Some(Tag::Keyword) => Style::default().fg(Color::Magenta),
+        Some(Tag::Function) => Style::default().fg(Color::Cyan),
+        Some(Tag::Number) => Style::default().fg(Color::Yellow),
+        Some(Tag::String) => Style::default().fg(Color::Green),
+        Some(Tag::Operator) => Style::default().fg(Color::Red),
+        Some(Tag::Comment) => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Some(Tag::Label) => Style::default().fg(Color::Blue),
+        Some(Tag::Ref) => Style::default().fg(Color::Blue),
+        Some(Tag::ListMarker) => Style::default().fg(Color::Cyan),
+        Some(Tag::Escape) => Style::default().fg(Color::Magenta),
+        Some(Tag::Punctuation) => Style::default().fg(Color::DarkGray),
+        Some(Tag::MathDelimiter) => Style::default().fg(Color::Magenta),
+        Some(Tag::MathOperator) => Style::default().fg(Color::Red),
+        Some(Tag::MathGroupingParens) => Style::default().fg(Color::DarkGray),
+        Some(Tag::Interpolated) => Style::default().fg(Color::Cyan),
+        Some(Tag::Error) => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        None => Style::default(),
+    }
+}
+```
+
+- [ ] **Step 3: Wire into the preview panel's match block**
+
+```rust
+let paragraph = match ext.as_deref() {
+    Some("md" | "markdown") => { /* existing */ }
+    Some("html" | "htm") => { /* existing */ }
+    Some("typ") => {
+        let lines = render_typst(&app.preview_content);
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((app.preview_scroll, 0))
+    }
+    _ => { /* existing default */ }
+};
+```
+
+- [ ] **Step 4: Write tests**
+
+```rust
+// In src/ui/preview_panel.rs #[cfg(test)] module
+
+#[test]
+fn test_typst_highlight_preserves_text() {
+    let source = "= Hello\n\nThis is *bold* and _emph_.\n\n```\ncode\n```";
+    let lines = render_typst(source);
+    let result: String = lines.iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The rendered text should contain the original content
+    // (newlines may differ due to tokenization, but key content should be there)
+    assert!(result.contains("Hello"), "heading text preserved");
+    assert!(result.contains("bold"), "strong text preserved");
+    assert!(result.contains("emph"), "emph text preserved");
+}
+
+#[test]
+fn test_typst_highlight_empty_source() {
+    let lines = render_typst("");
+    assert!(!lines.is_empty(), "should produce at least one line");
 }
 ```
 
@@ -806,11 +1405,416 @@ pub fn render(app: &App, frame: &mut Frame, area: Rect) {
 cargo check && cargo clippy && cargo fmt && cargo test
 ```
 
-Expected: zero warnings, tests pass.
+Expected: zero warnings, 274+ tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/ui/settings_panel.rs src/ui/mod.rs src/app.rs
-git commit -m "feat: add settings panel with theme display"
+git add Cargo.toml Cargo.lock src/ui/preview_panel.rs
+git commit -m "feat: Typst syntax highlighting in preview panel"
 ```
+
+---
+
+### Task 9: Bookmarks (P3)
+
+**Files:**
+- Modify: `src/config.rs:9-12`, `src/app.rs:36-89, 92-112, 425-497, 696-759`
+
+**Interfaces:**
+- Consumes: `Settings` struct, `save_settings`, `App` struct
+- Produces: `Settings.bookmarks: Vec<PathBuf>`, `b` toggle bookmark, `B` cycle bookmarks
+
+- [ ] **Step 1: Add bookmarks to Settings**
+
+```rust
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Settings {
+    pub last_directory: Option<PathBuf>,
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub bookmarks: Vec<PathBuf>,
+}
+```
+
+- [ ] **Step 2: Update Settings literals in app.rs**
+
+Both `navigate_to` (line ~105) and `cycle_theme` (line ~205) construct `Settings { ... }` literally. They need the new field. Use `..Default::default()`:
+
+```rust
+let _ = save_settings(&Settings {
+    last_directory: Some(self.current_dir.clone()),
+    theme: None,
+    bookmarks: vec![], // or use ..Default::default()
+});
+```
+
+- [ ] **Step 3: Add bookmarks field to App**
+
+```rust
+// In App struct:
+pub bookmarks: Vec<PathBuf>;
+```
+
+In `App::new()` after `load_settings()`:
+```rust
+let bookmarks = settings.bookmarks.clone();
+```
+
+In `Self`: `bookmarks,`
+
+- [ ] **Step 4: Add b/B keybindings in handle_browser_key**
+
+```rust
+KeyCode::Char('b') => {
+    if self.bookmarks.contains(&self.current_dir) {
+        self.bookmarks.retain(|d| d != &self.current_dir);
+        self.add_log(format!("🔖 Unbookmarked: {}", self.current_dir.display()));
+    } else {
+        self.bookmarks.push(self.current_dir.clone());
+        self.add_log(format!("🔖 Bookmarked: {}", self.current_dir.display()));
+    }
+    let _ = save_settings(&Settings {
+        last_directory: Some(self.current_dir.clone()),
+        theme: Some(self.theme_name.clone()),
+        bookmarks: self.bookmarks.clone(),
+    });
+    true
+}
+KeyCode::Char('B') => {
+    if self.bookmarks.is_empty() {
+        self.add_log("No bookmarks".to_string());
+        return true;
+    }
+    // Find current dir in bookmarks, cycle to next
+    let pos = self.bookmarks.iter().position(|d| d == &self.current_dir);
+    let next_pos = match pos {
+        Some(i) if i + 1 < self.bookmarks.len() => i + 1,
+        _ => 0,
+    };
+    self.navigate_to(&self.bookmarks[next_pos]);
+    self.add_log(format!("🔖 Bookmark {}: {}", next_pos + 1, self.current_dir.display()));
+    true
+}
+```
+
+- [ ] **Step 5: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    bookmarks: vec![],
+    // ...
+}
+fn app_in_temp_dir(dir: &TempDir) -> App {
+    // ...
+    bookmarks: vec![],
+    // ...
+}
+```
+
+- [ ] **Step 6: Write tests**
+
+```rust
+#[test]
+fn bookmark_toggle_adds_removes() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert!(app.bookmarks.contains(&dir.path()));
+    assert!(app.handle_browser_key(key));
+    assert!(!app.bookmarks.contains(&dir.path()));
+}
+
+#[test]
+fn bookmark_cycle_navigates() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let subdir = dir.path().join("subdir");
+    app.bookmarks = vec![dir.path().to_path_buf(), subdir.clone()];
+    app.navigate_to(&subdir);
+    let key = KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert_eq!(app.current_dir, dir.path());
+}
+
+#[test]
+fn bookmark_no_bookmarks_logs() {
+    let mut app = app_with_entries(vec![]);
+    let key = KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE);
+    assert!(app.handle_browser_key(key));
+    assert!(app.log_messages.iter().any(|m| m.contains("No bookmarks")));
+}
+```
+
+- [ ] **Step 7: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 278+ tests pass.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/app.rs src/config.rs
+git commit -m "feat: bookmarks with 'b' toggle and 'B' cycle"
+```
+
+---
+
+### Task 10: Global Recursive File Search (P3)
+
+**Files:**
+- Modify: `src/app.rs:36-89, 425-497, 696-759`
+- Modify: `src/ui/browser_panel.rs`
+
+**Interfaces:**
+- Consumes: `App` struct, `walkdir`-like recursion (std::fs only, no new dep)
+- Produces: `f` key triggers recursive search in browser focus, results shown as flat list
+
+Use `f` key in browser focus to trigger a recursive search from current_dir. The search walks directories (max 500 results, max depth 4) and shows matching files. Results replace the entries list. Enter opens the file. Esc clears search results.
+
+- [ ] **Step 1: Add search fields to App**
+
+```rust
+// In App struct:
+pub search_results: Vec<FsEntry>,
+pub searching: bool,
+```
+
+In `App::new()`:
+```rust
+search_results: vec![],
+searching: false,
+```
+
+- [ ] **Step 2: Add recursive search method**
+
+```rust
+/// Recursively search for files by name (case-insensitive substring).
+pub fn search_files(&mut self, query: &str) {
+    const MAX_RESULTS: usize = 500;
+    const MAX_DEPTH: u32 = 4;
+    let mut results = Vec::new();
+
+    fn walk(dir: &Path, query: &str, depth: u32, results: &mut Vec<FsEntry>, max: &mut usize) {
+        if *max == 0 || depth > MAX_DEPTH {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if *max == 0 {
+                    return;
+                }
+                let path = entry.path();
+                if let Ok(ftype) = entry.file_type() {
+                    if ftype.is_dir() {
+                        walk(&path, query, depth + 1, results, max);
+                    } else if ftype.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.to_lowercase().contains(&query.to_lowercase())
+                                && is_supported_file(&path)
+                            {
+                                let name = name.to_string();
+                                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                results.push(FsEntry::File { path, name, extension: ext, size });
+                                *max -= 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut max = MAX_RESULTS;
+    walk(&self.current_dir, query, 0, &mut results, &mut max);
+    self.search_results = results;
+    self.searching = true;
+    self.entries = self.search_results.clone();
+    self.selected_index = 0;
+    self.preview_content.clear();
+    self.preview_path = None;
+    self.add_log(format!("Search: {query} ({} results)", self.entries.len()));
+}
+```
+
+- [ ] **Step 3: Add f keybinding in handle_browser_key**
+
+```rust
+KeyCode::Char('f') => {
+    self.mode = Mode::Input(InputMode::Search);
+    self.input_buffer.clear();
+    self.add_log("Search: type query, Enter to search, Esc to cancel".to_string());
+    true
+}
+```
+
+Add `Search` to `InputMode`:
+```rust
+pub enum InputMode {
+    Rename,
+    NewFile,
+    NewDir,
+    Search,
+}
+```
+
+Add handler in `handle_key` for `InputMode::Search`:
+```rust
+InputMode::Search => {
+    if name.is_empty() {
+        self.add_log("Search query empty".to_string());
+    } else {
+        self.search_files(&name);
+    }
+    true
+}
+```
+
+And Esc handler clears search:
+```rust
+// In main handle_key, before the mode check:
+if self.searching && matches!(key.code, KeyCode::Esc) {
+    self.searching = false;
+    self.navigate_to(&self.current_dir.clone());
+    self.add_log("Search cancelled".to_string());
+    return true;
+}
+```
+
+- [ ] **Step 4: Update test helpers**
+
+```rust
+fn app_with_entries(entries: Vec<FsEntry>) -> App {
+    // ...
+    search_results: vec![],
+    searching: false,
+    // ...
+}
+```
+
+- [ ] **Step 5: Write tests**
+
+```rust
+#[test]
+fn search_files_finds_matching_files() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.search_files("readme");
+    assert!(!app.entries.is_empty(), "should find readme.md");
+    assert!(app.entries.iter().any(|e| e.name() == "readme.md"));
+}
+
+#[test]
+fn search_files_returns_empty_for_no_match() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    app.search_files("zzzzz");
+    assert!(app.entries.is_empty());
+}
+
+#[test]
+fn search_esc_clears_and_restores() {
+    let dir = create_test_dir();
+    let mut app = app_in_temp_dir(&dir);
+    let original_count = app.entries.len();
+    app.search_files("x");
+    assert!(app.entries.is_empty() || app.entries.len() < original_count);
+    app.searching = false;
+    app.navigate_to(&app.current_dir.clone());
+    assert_eq!(app.entries.len(), original_count);
+}
+```
+
+- [ ] **Step 6: Verify**
+
+```bash
+cargo check && cargo clippy && cargo fmt && cargo test
+```
+
+Expected: zero warnings, 282+ tests pass.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/app.rs src/ui/browser_panel.rs
+git commit -m "feat: global recursive file search with 'f' key"
+```
+
+---
+
+### Task 11: CI Pipeline (P1)
+
+**Files:**
+- Create: `.github/workflows/ci.yml`
+
+**Interfaces:** None (CI only)
+
+- [ ] **Step 1: Create CI workflow**
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Build
+        run: cargo build --verbose
+      - name: Test
+        run: cargo test --verbose
+      - name: Build with Typst
+        run: cargo build --features typst --verbose
+```
+
+- [ ] **Step 2: Verify**
+
+```bash
+# Validate YAML syntax
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
+```
+
+Expected: no YAML parse errors.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add .github/workflows/ci.yml
+git commit -m "ci: add GitHub Actions workflow for fmt, clippy, test, and build"
+```
+
+---
+
+### Future / Stretch
+
+These items are not in the current plan but could be added in later phases:
+
+- **Global keybindings**: show all keybindings on the status bar / help popup update
+- **Code coverage**: integrate `cargo llvm-cov` and add coverage badge
+- **Release build**: verify `cargo install --path .` works, add to README
+- **Configuration UI**: inline theme cycling in the settings panel is already done; adding more config options (default format, editor keybinding)
+- **Image preview**: show images in the terminal via `viu` or similar
+- **Trash UI**: browse trash, restore files, empty trash command
