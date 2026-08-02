@@ -1,0 +1,30 @@
+[package]
+name = "lazymd"
+version = "0.1.0"
+edition = "2024"
+description = "A TUI for bidirectional conversion between Markdown, HTML, and PDF"
+
+[features]
+default = []
+typst = ["dep:typst", "dep:typst-pdf", "dep:typst-html", "dep:typst-assets", "dep:typst-layout", "dep:typst-library"]
+
+[dependencies]
+pulldown-cmark = "0.13"                      # MD → HTML
+markdown2pdf = "1.6"                         # MD → PDF
+printpdf = { version = "0.9", features = ["html"] }  # HTML → PDF
+html2md = "0.2"                              # HTML → MD
+pdf_oxide = "0.3"                            # PDF → MD / PDF → HTML
+ratatui = "0.29"                             # TUI framework
+crossterm = "0.28"                           # Terminal backend
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+dirs = "6"
+tempfile = "3"                               # Tempfiles for intermediate conversions
+
+# Typst support (optional, behind "typst" feature)
+typst = { version = "0.15", optional = true }
+typst-pdf = { version = "0.15", optional = true }
+typst-html = { version = "0.15", optional = true }
+typst-assets = { version = "0.15", optional = true }
+typst-layout = { version = "0.15", optional = true }
+typst-library = { version = "0.15", optional = true }
