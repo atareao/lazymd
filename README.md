@@ -72,6 +72,7 @@ cargo run
 | `q` / `Ctrl+q` | Quit |
 | `s` | Open settings (cycle theme) |
 | `Tab` | Cycle focus (Browser ↔ Preview ↔ Log) |
+| `1` / `2` / `3` | Jump to Browser / Preview / Log panel |
 | `?` / `Esc` | Toggle help / close preview |
 
 **Browser panel:**

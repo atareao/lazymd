@@ -13,14 +13,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         Mode::Settings => "[s/Tab] Cycle theme  [Esc] Close  [q] Quit",
         Mode::Browse | Mode::Preview => match app.focus {
             Focus::Browser => {
-                "[j/k/\u{2191}/\u{2193}] Nav  [Enter] Open  [h/\u{2190}] Parent  [l/\u{2192}] Enter  \
+                "[1/2/3] Panels  [j/k/\u{2191}/\u{2193}] Nav  [Enter] Open  [h/\u{2190}] Parent  [l/\u{2192}] Enter  \
                  [/] Filter  [r] Refresh  [m] MD  [p] PDF  [t] Typst  [d] Del  [R] Ren  [s] Sett  [?] Help  [q] Quit"
             }
             Focus::Preview => {
-                "[j/k/\u{2191}/\u{2193}] Scroll  [PgUp/PgDn] Page  [g] Top  [G] End  \
+                "[1/2/3] Panels  [j/k/\u{2191}/\u{2193}] Scroll  [PgUp/PgDn] Page  [g] Top  [G] End  \
                  [m] MD  [h] HTML  [p] PDF  [t] Typst  [Esc] Back  [q] Quit"
             }
-            Focus::Log => "[j/k/\u{2191}/\u{2193}] Scroll  [Tab] Focus  [q] Quit",
+            Focus::Log => "[1/2/3] Panels  [j/k/\u{2191}/\u{2193}] Scroll  [Tab] Focus  [q] Quit",
         },
     };
 

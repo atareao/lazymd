@@ -447,6 +447,18 @@ impl App {
                 };
                 true
             }
+            KeyCode::Char('1') => {
+                self.focus = Focus::Browser;
+                true
+            }
+            KeyCode::Char('2') => {
+                self.focus = Focus::Preview;
+                true
+            }
+            KeyCode::Char('3') => {
+                self.focus = Focus::Log;
+                true
+            }
             _ if self.filtering && self.focus == Focus::Browser => self.handle_filter_key(key),
             _ => match self.focus {
                 Focus::Browser => self.handle_browser_key(key),
@@ -1654,6 +1666,33 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('q'), crossterm::event::KeyModifiers::NONE);
         assert!(app.handle_key(key));
         assert!(app.running);
+    }
+
+    #[test]
+    fn handle_key_1_jumps_to_browser() {
+        let mut app = App::new();
+        app.focus = Focus::Log;
+        let key = KeyEvent::new(KeyCode::Char('1'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.focus, Focus::Browser);
+    }
+
+    #[test]
+    fn handle_key_2_jumps_to_preview() {
+        let mut app = App::new();
+        app.focus = Focus::Log;
+        let key = KeyEvent::new(KeyCode::Char('2'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.focus, Focus::Preview);
+    }
+
+    #[test]
+    fn handle_key_3_jumps_to_log() {
+        let mut app = App::new();
+        app.focus = Focus::Browser;
+        let key = KeyEvent::new(KeyCode::Char('3'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.focus, Focus::Log);
     }
 
     #[test]

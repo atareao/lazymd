@@ -12,6 +12,7 @@ const HELP_TEXT: &str = concat!(
     "│  q / Ctrl+q    Quit                         │\n",
     "│  s             Settings (cycle theme)       │\n",
     "│  Tab           Cycle focus                  │\n",
+    "│  1 / 2 / 3     Jump to Browser/Preview/Log  │\n",
     "│  ? / Esc       Toggle help / close preview  │\n",
     "│                                             │\n",
     "│  Browser (file tree)                        │\n",
