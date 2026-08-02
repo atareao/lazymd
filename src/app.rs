@@ -377,6 +377,8 @@ impl App {
         match convert(&input, &output, target) {
             Ok(()) => {
                 self.add_log(format!("✓ Conversion complete: {}", output.display()));
+                // Refresh the browser to show the new file
+                self.navigate_to(&self.current_dir.clone());
                 // Preview the result
                 self.preview_path = Some(output);
                 if let Ok(content) = preview_file(self.preview_path.as_ref().unwrap()) {
@@ -2216,6 +2218,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn convert_current_refreshes_browser_entries() {
+        let dir = create_test_dir();
+        let mut app = app_in_temp_dir(&dir);
+        // Preview a markdown file and convert it to HTML
+        let md_path = dir.path().join("readme.md");
+        let html_path = dir.path().join("readme.html");
+        std::fs::remove_file(&html_path).ok(); // ensure it doesn't already exist
+        app.preview_path = Some(md_path);
+        app.convert_current(Format::Html);
+        // The browser should now include the generated HTML file
+        assert!(
+            app.entries.iter().any(|e| e.path() == html_path),
+            "browser should show the generated HTML file after conversion"
+        );
+    }
+
     // ======================================================================
     // Enums
     // ======================================================================
@@ -2293,6 +2312,9 @@ mod tests {
     #[test]
     fn cycle_theme_cycles_through_all_themes() {
         let mut app = App::new();
+        // Reset to known state regardless of on-disk config
+        app.theme_name = "dark".to_string();
+        app.theme = Theme::dark();
         let themes = ["dark", "light", "dracula", "solarized"];
         for expected in themes {
             assert_eq!(app.theme_name, expected, "expected theme {expected}");
@@ -2305,6 +2327,9 @@ mod tests {
     #[test]
     fn cycle_theme_wraps_around() {
         let mut app = App::new();
+        // Reset to known state regardless of on-disk config
+        app.theme_name = "dark".to_string();
+        app.theme = Theme::dark();
         // Cycle 5 times — should be back to "light" (index 1)
         for _ in 0..5 {
             app.cycle_theme();
@@ -2315,6 +2340,9 @@ mod tests {
     #[test]
     fn cycle_theme_logs_new_theme() {
         let mut app = App::new();
+        // Reset to known state regardless of on-disk config
+        app.theme_name = "dark".to_string();
+        app.theme = Theme::dark();
         app.cycle_theme();
         assert!(
             app.log_messages.iter().any(|m| m.contains("Theme: light")),
