@@ -86,7 +86,7 @@ cargo run
 | `l` / `→` | Enter directory |
 | `r` | Refresh directory |
 | `/` | Filter entries by name (type query, Enter to apply, Esc to cancel) |
-| `d` | Delete selected file |
+| `d` | Delete selected file (with confirmation dialog) |
 | `R` | Rename selected file (appends `-renamed`) |
 | `m` / `p` / `t` | Convert to Markdown / PDF / Typst |
 

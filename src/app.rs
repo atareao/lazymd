@@ -22,6 +22,8 @@ pub enum Mode {
     Help,
     /// Viewing the settings panel.
     Settings,
+    /// Confirmation dialog for destructive actions.
+    ConfirmDelete,
 }
 
 /// Which panel has keyboard focus.
@@ -50,6 +52,8 @@ pub struct App {
     pub log_scroll: u16,
     pub theme: Theme,
     pub theme_name: String,
+    pub pending_delete_path: Option<PathBuf>,
+    pub pending_delete_name: String,
 }
 
 impl Default for App {
@@ -83,6 +87,8 @@ impl App {
             log_scroll: 0,
             theme,
             theme_name,
+            pending_delete_path: None,
+            pending_delete_name: String::new(),
         }
     }
 
@@ -258,26 +264,24 @@ impl App {
     }
 
     /// Delete the selected file.
-    pub fn delete_selected(&mut self) {
-        let entry_idx = match self.real_selected_index() {
-            Some(idx) => idx,
+    /// Execute the confirmed delete operation.
+    pub fn confirm_delete(&mut self) {
+        let path = match &self.pending_delete_path {
+            Some(p) => p.clone(),
             None => return,
         };
-        let entry = &self.entries[entry_idx];
-        match entry {
-            FsEntry::File { path, name, .. } => match std::fs::remove_file(path) {
-                Ok(()) => {
-                    self.add_log(format!("🗑️ Deleted: {name}"));
-                    self.navigate_to(&self.current_dir.clone());
-                }
-                Err(e) => {
-                    self.add_log(format!("✗ Delete failed: {e}"));
-                }
-            },
-            FsEntry::Directory { .. } => {
-                self.add_log("Cannot delete directories from the TUI".to_string());
+        let name = self.pending_delete_name.clone();
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                self.add_log(format!("🗑️ Deleted: {name}"));
+                self.navigate_to(&self.current_dir.clone());
+            }
+            Err(e) => {
+                self.add_log(format!("✗ Delete failed: {e}"));
             }
         }
+        self.pending_delete_path = None;
+        self.pending_delete_name.clear();
     }
 
     /// Rename the selected file (or directory) to a new name.
@@ -435,6 +439,24 @@ impl App {
             };
         }
 
+        // Confirm delete mode: y/Enter confirms, n/Esc cancels
+        if self.mode == Mode::ConfirmDelete {
+            return match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.confirm_delete();
+                    self.mode = Mode::Browse;
+                    true
+                }
+                KeyCode::Char('n') | KeyCode::Esc | KeyCode::Char('q') => {
+                    self.pending_delete_path = None;
+                    self.pending_delete_name.clear();
+                    self.mode = Mode::Browse;
+                    true
+                }
+                _ => true,
+            };
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => {
                 self.running = false;
@@ -525,7 +547,18 @@ impl App {
                 true
             }
             KeyCode::Char('d') => {
-                self.delete_selected();
+                // Open confirmation dialog instead of deleting directly
+                let entry_idx = match self.real_selected_index() {
+                    Some(idx) => idx,
+                    None => return true,
+                };
+                if let FsEntry::File { path, name, .. } = &self.entries[entry_idx] {
+                    self.pending_delete_path = Some(path.clone());
+                    self.pending_delete_name = name.clone();
+                    self.mode = Mode::ConfirmDelete;
+                } else {
+                    self.add_log("Cannot delete directories from the TUI".to_string());
+                }
                 true
             }
             KeyCode::Char('R') => {
@@ -772,6 +805,8 @@ mod tests {
             log_scroll: 0,
             theme: Theme::dark(),
             theme_name: "dark".to_string(),
+            pending_delete_path: None,
+            pending_delete_name: String::new(),
         }
     }
 
@@ -815,6 +850,8 @@ mod tests {
             log_scroll: 0,
             theme: Theme::dark(),
             theme_name: "dark".to_string(),
+            pending_delete_path: None,
+            pending_delete_name: String::new(),
         }
     }
 
@@ -1331,11 +1368,11 @@ mod tests {
     }
 
     // ======================================================================
-    // delete_selected / rename_selected
+    // Confirmation dialog / delete
     // ======================================================================
 
     #[test]
-    fn delete_selected_removes_file() {
+    fn browser_key_d_opens_confirm_dialog() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("test.md");
         fs::write(&file_path, "content").unwrap();
@@ -1344,21 +1381,42 @@ mod tests {
             .entries
             .iter()
             .position(|e| e.name() == "test.md")
-            .unwrap();
+            .unwrap()
+            + 1; // visual index
         app.selected_index = idx;
-        app.delete_selected();
+        let key = KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE);
+        app.handle_browser_key(key);
+        assert_eq!(
+            app.mode,
+            Mode::ConfirmDelete,
+            "pressing d should open confirm dialog"
+        );
+        assert_eq!(app.pending_delete_name, "test.md");
+        assert!(app.pending_delete_path.is_some());
+    }
+
+    #[test]
+    fn confirm_delete_removes_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        app.pending_delete_path = Some(file_path.clone());
+        app.pending_delete_name = "test.md".to_string();
+        app.confirm_delete();
         assert!(!file_path.exists(), "file should be deleted");
         assert!(app.log_messages.iter().any(|m| m.contains("Deleted")));
     }
 
     #[test]
-    fn delete_selected_empty_entries_no_panic() {
+    fn confirm_delete_empty_path_does_nothing() {
         let mut app = app_with_entries(vec![]);
-        app.delete_selected(); // should not panic
+        app.confirm_delete(); // should not panic
+        assert!(app.pending_delete_path.is_none());
     }
 
     #[test]
-    fn delete_selected_directory_is_rejected() {
+    fn browser_key_d_on_directory_is_rejected() {
         let dir = TempDir::new().unwrap();
         fs::create_dir(dir.path().join("subdir")).unwrap();
         let mut app = app_in_temp_dir(&dir);
@@ -1366,30 +1424,76 @@ mod tests {
             .entries
             .iter()
             .position(|e| e.name() == "subdir")
-            .unwrap();
+            .unwrap()
+            + 1; // visual index
         app.selected_index = idx;
-        app.delete_selected();
-        assert!(dir.path().join("subdir").exists(), "dir should remain");
+        let key = KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE);
+        app.handle_browser_key(key);
         assert!(
             app.log_messages.iter().any(|m| m.contains("Cannot delete")),
             "should log rejection"
         );
+        assert_ne!(
+            app.mode,
+            Mode::ConfirmDelete,
+            "should not open confirm dialog for directories"
+        );
     }
 
     #[test]
-    fn delete_selected_nonexistent_file_logs_error() {
+    fn confirm_delete_nonexistent_file_logs_error() {
         let dir = TempDir::new().unwrap();
         let mut app = app_in_temp_dir(&dir);
-        // Craft an entry pointing at a non-existent file
-        app.entries.push(FsEntry::File {
-            path: dir.path().join("ghost.md"),
-            name: "ghost.md".into(),
-            extension: "md".into(),
-            size: 0,
-        });
-        app.selected_index = app.entries.len() - 1;
-        app.delete_selected();
+        app.pending_delete_path = Some(dir.path().join("ghost.md"));
+        app.pending_delete_name = "ghost.md".to_string();
+        app.confirm_delete();
         assert!(app.log_messages.iter().any(|m| m.contains("failed")));
+    }
+
+    #[test]
+    fn handle_key_y_confirms_delete() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        app.mode = Mode::ConfirmDelete;
+        app.pending_delete_path = Some(file_path.clone());
+        app.pending_delete_name = "test.md".to_string();
+        let key = KeyEvent::new(KeyCode::Char('y'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert!(!file_path.exists(), "file should be deleted after confirm");
+        assert_eq!(app.mode, Mode::Browse);
+    }
+
+    #[test]
+    fn handle_key_n_cancels_delete() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("test.md");
+        fs::write(&file_path, "content").unwrap();
+        let mut app = app_in_temp_dir(&dir);
+        app.mode = Mode::ConfirmDelete;
+        app.pending_delete_path = Some(file_path.clone());
+        app.pending_delete_name = "test.md".to_string();
+        let key = KeyEvent::new(KeyCode::Char('n'), crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert!(
+            file_path.exists(),
+            "file should NOT be deleted after cancel"
+        );
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.pending_delete_path.is_none());
+    }
+
+    #[test]
+    fn handle_key_esc_cancels_delete() {
+        let mut app = App::new();
+        app.mode = Mode::ConfirmDelete;
+        app.pending_delete_path = Some(PathBuf::from("test.md"));
+        app.pending_delete_name = "test.md".to_string();
+        let key = KeyEvent::new(KeyCode::Esc, crossterm::event::KeyModifiers::NONE);
+        assert!(app.handle_key(key));
+        assert_eq!(app.mode, Mode::Browse);
+        assert!(app.pending_delete_path.is_none());
     }
 
     #[test]
@@ -1451,23 +1555,6 @@ mod tests {
     fn rename_selected_empty_entries_no_panic() {
         let mut app = app_with_entries(vec![]);
         app.rename_selected("new.md"); // should not panic
-    }
-
-    #[test]
-    fn browser_key_d_deletes_selected() {
-        let dir = TempDir::new().unwrap();
-        let file_path = dir.path().join("test.md");
-        fs::write(&file_path, "content").unwrap();
-        let mut app = app_in_temp_dir(&dir);
-        let idx = app
-            .entries
-            .iter()
-            .position(|e| e.name() == "test.md")
-            .unwrap();
-        app.selected_index = idx;
-        let key = KeyEvent::new(KeyCode::Char('d'), crossterm::event::KeyModifiers::NONE);
-        assert!(app.handle_browser_key(key));
-        assert!(!file_path.exists());
     }
 
     #[test]

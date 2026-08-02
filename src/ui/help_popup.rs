@@ -23,7 +23,7 @@ const HELP_TEXT: &str = concat!(
     "│  l / →         Enter directory              │\n",
     "│  r             Refresh directory             │\n",
     "│  /             Filter entries (type + Enter)  │\n",
-    "│  d             Delete selected file            │\n",
+    "│  d             Delete file (with confirmation)  │\n",
     "│  R             Rename selected file            │\n",
     "│  m / p / t     Convert to MD / PDF / Typst  │\n",
     "│                                             │\n",

@@ -11,6 +11,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let text = match app.mode {
         Mode::Help => "[Esc/?] Close help",
         Mode::Settings => "[s/Tab] Cycle theme  [Esc] Close  [q] Quit",
+        Mode::ConfirmDelete => "[Y] Yes, delete  [N/Esc] No, cancel",
         Mode::Browse | Mode::Preview => match app.focus {
             Focus::Browser => {
                 "[1/2/3] Panels  [j/k/\u{2191}/\u{2193}] Nav  [Enter] Open  [h/\u{2190}] Parent  [l/\u{2192}] Enter  \
