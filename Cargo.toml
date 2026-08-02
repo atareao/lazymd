@@ -2,7 +2,12 @@
 name = "lazymd"
 version = "0.2.0"
 edition = "2024"
-description = "A TUI for bidirectional conversion between Markdown, HTML, and PDF"
+description = "A TUI for bidirectional conversion between Markdown, HTML, PDF, and Typst"
+license = "MIT"
+repository = "https://github.com/atareao/lazymd"
+homepage = "https://github.com/atareao/lazymd"
+keywords = ["markdown", "html", "pdf", "typst", "tui"]
+categories = ["command-line-utilities", "text-processing"]
 
 [features]
 default = []
